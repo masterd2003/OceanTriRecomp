@@ -1,0 +1,9 @@
+#pragma once
+
+#if defined(_WIN32)
+#include <string.h>
+#define strcasecmp _stricmp
+#define strncasecmp _strnicmp
+#else
+#include_next <strings.h>
+#endif

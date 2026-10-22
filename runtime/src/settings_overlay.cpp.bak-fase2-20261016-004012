@@ -1,0 +1,1073 @@
+﻿#include "settings_overlay.h"
+#include "runtime_config.h"
+#include "mh3_frame_rate_control.h"
+#include "language.h"
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <string_view>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <utility>
+#include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <windowsx.h>
+#include <dwmapi.h>
+#include <shellapi.h>
+#include <SDL3/SDL_events.h>
+#include <SDL3/SDL_properties.h>
+#include <SDL3/SDL_video.h>
+#include <dolphin/vi.h>
+
+void aurora_enable_vsync(bool enabled);
+namespace settings_overlay {
+namespace {
+constexpr wchar_t OverlayClassName[] = L"MH3RecompSettingsOverlayV3";
+constexpr wchar_t HudClassName[] = L"MH3RecompFpsHudV3";
+constexpr int PanelWidth = 690;
+constexpr int PanelHeight = 530;
+constexpr int HudWidth = 148;
+constexpr int HudHeight = 42;
+constexpr int NavX = 24, NavY = 98, NavW = 152, NavH = 42, NavGap = 10;
+constexpr int ContentX = 198, ContentRight = 664;
+constexpr int DropdownRowsTheme = 6, DropdownRowsResolution = 4, DropdownRowsFont = 5, DropdownRowsAntialiasing = 2, DropdownRowsFrameRate = 5;
+constexpr int DropdownThemeRowH = 27, DropdownResolutionRowH = 27, DropdownFontRowH = 28, DropdownAntialiasingRowH = 29, DropdownFrameRateRowH = 26;
+constexpr std::array<const wchar_t*, 5> FontFaces{{L"Segoe UI", L"Consolas", L"Bahnschrift", L"Arial", L"Verdana"}};
+constexpr std::array<const wchar_t*, 2> AntialiasingNames{{L"Desactivado", L"MSAA 4×"}};
+constexpr std::array<int, 5> FrameRateValues{{30, 45, 60, 90, 120}};
+constexpr std::array<const wchar_t*, 5> FrameRateNames{{L"30 FPS", L"45 FPS", L"60 FPS", L"90 FPS", L"120 FPS"}};
+
+struct Theme {
+    const wchar_t* name;
+    COLORREF bg, panel, card, hover, ink, muted, accent, border;
+    int style; // 0 mist, 1 flat, 2 liquid glass, 3 minimalist, 4 palette
+    bool light;
+};
+
+constexpr std::array<Theme, 40> Themes{{
+    {L"Neblina de Moga", RGB(239,245,250), RGB(249,251,253), RGB(230,239,246), RGB(215,231,243), RGB(30,45,61), RGB(91,111,130), RGB(31,142,192), RGB(177,202,220), 0,true},
+    {L"Neblina Nocturna", RGB(19,27,39), RGB(26,37,52), RGB(36,51,70), RGB(48,67,89), RGB(240,247,255), RGB(164,183,203), RGB(92,196,235), RGB(76,104,131), 0,false},
+    {L"Acero de Barroth", RGB(246,247,249), RGB(255,255,255), RGB(235,238,242), RGB(220,226,233), RGB(35,42,51), RGB(105,114,126), RGB(44,120,210), RGB(204,211,220), 1,true},
+    {L"Acero de Barroth · Noche", RGB(23,26,32), RGB(30,34,42), RGB(40,46,57), RGB(52,61,75), RGB(241,244,249), RGB(163,172,188), RGB(85,157,255), RGB(70,80,97), 1,false},
+    {L"Cristal de Lagiacrus", RGB(231,247,249), RGB(245,254,254), RGB(220,243,245), RGB(199,232,236), RGB(22,61,68), RGB(79,125,132), RGB(0,155,169), RGB(143,207,213), 2,true},
+    {L"Abismo de Lagiacrus", RGB(12,31,39), RGB(17,43,52), RGB(24,58,69), RGB(32,76,89), RGB(228,250,252), RGB(143,190,198), RGB(50,218,223), RGB(54,113,125), 2,false},
+    {L"Pergamino de la Guilda", RGB(230,214,171), RGB(246,233,195), RGB(236,219,177), RGB(220,197,145), RGB(73,49,25), RGB(130,96,54), RGB(143,81,31), RGB(188,151,86), 5,true},
+    {L"Sombra de la Guilda", RGB(17,17,18), RGB(24,24,26), RGB(33,33,36), RGB(46,46,50), RGB(245,245,246), RGB(164,164,170), RGB(238,238,240), RGB(68,68,73), 3,false},
+    {L"Laguna de Moga", RGB(8,28,43), RGB(13,43,61), RGB(19,59,81), RGB(29,80,105), RGB(230,250,255), RGB(142,191,207), RGB(46,220,220), RGB(37,113,137), 2,false},
+    {L"Rathalos Carmesí", RGB(42,20,28), RGB(58,27,37), RGB(78,37,47), RGB(98,47,56), RGB(255,238,230), RGB(214,166,153), RGB(255,126,88), RGB(135,70,76), 0,false},
+    {L"Flor de Rathian", RGB(48,27,43), RGB(64,36,57), RGB(85,48,76), RGB(107,61,95), RGB(255,239,249), RGB(219,173,205), RGB(255,126,194), RGB(145,84,127), 2,false},
+    {L"Barro del Desierto", RGB(32,27,52), RGB(45,38,69), RGB(61,51,91), RGB(79,66,115), RGB(244,239,255), RGB(188,177,218), RGB(174,139,255), RGB(104,88,146), 1,false},
+    {L"Pluma de Qurupeco", RGB(19,35,29), RGB(27,48,39), RGB(38,65,51), RGB(49,83,64), RGB(235,250,237), RGB(162,194,166), RGB(108,220,137), RGB(76,120,84), 0,false},
+    {L"Abismo de Gobul", RGB(29,36,16), RGB(42,51,22), RGB(57,69,28), RGB(73,88,36), RGB(247,255,222), RGB(195,207,151), RGB(195,240,74), RGB(105,126,48), 2,false},
+    {L"Espuma de Ludroth", RGB(38,29,22), RGB(53,39,29), RGB(70,51,37), RGB(91,65,46), RGB(255,244,229), RGB(203,176,148), RGB(235,151,83), RGB(124,91,65), 0,false},
+    {L"Magma de Agnaktor", RGB(40,18,25), RGB(57,24,34), RGB(76,31,44), RGB(98,39,55), RGB(255,236,240), RGB(215,160,171), RGB(255,84,118), RGB(137,61,79), 1,false},
+    {L"Basalto de Uragaan", RGB(15,25,48), RGB(22,36,66), RGB(30,49,86), RGB(41,64,109), RGB(235,242,255), RGB(165,184,219), RGB(91,151,255), RGB(66,91,145), 1,false},
+    {L"Oro de Jhen Mohran", RGB(36,19,48), RGB(50,27,66), RGB(67,36,87), RGB(85,46,110), RGB(250,237,255), RGB(202,169,220), RGB(210,113,255), RGB(119,71,145), 2,false},
+    {L"Eclipse de Alatreon", RGB(10,15,29), RGB(15,22,42), RGB(22,31,57), RGB(31,43,76), RGB(235,250,255), RGB(150,176,205), RGB(0,255,210), RGB(40,111,131), 3,false},
+    {L"Colmillo de Deviljho", RGB(8,20,14), RGB(12,31,21), RGB(18,44,29), RGB(24,59,38), RGB(221,255,228), RGB(130,189,145), RGB(74,255,116), RGB(41,112,61), 0,false},
+    {L"Perla de Ceadeus", RGB(22,13,39), RGB(32,19,55), RGB(44,27,76), RGB(59,36,99), RGB(250,239,255), RGB(189,165,220), RGB(255,80,221), RGB(102,69,150), 2,false},
+    {L"Brisa de Moga", RGB(43,27,13), RGB(61,38,17), RGB(81,50,22), RGB(103,64,27), RGB(255,245,226), RGB(218,183,136), RGB(255,171,54), RGB(145,97,43), 0,false},
+    {L"Marea Profunda", RGB(21,37,48), RGB(29,51,65), RGB(40,68,85), RGB(53,87,106), RGB(239,251,255), RGB(170,202,217), RGB(132,224,255), RGB(82,129,151), 1,false},
+    {L"Bosque Inundado", RGB(18,38,34), RGB(25,53,46), RGB(35,70,61), RGB(47,90,77), RGB(231,255,247), RGB(159,208,190), RGB(95,240,183), RGB(70,130,111), 2,false},
+    {L"Arena del Cazador", RGB(45,24,25), RGB(63,32,33), RGB(83,42,43), RGB(106,54,55), RGB(255,241,235), RGB(218,173,165), RGB(255,126,112), RGB(147,81,77), 0,false},
+    {L"Volcán en Erupción", RGB(39,32,15), RGB(55,45,19), RGB(74,60,25), RGB(96,77,31), RGB(255,249,222), RGB(213,195,142), RGB(255,209,74), RGB(134,111,48), 3,false},
+    {L"Guardia de Moga", RGB(25,25,27), RGB(34,34,37), RGB(47,47,51), RGB(61,61,66), RGB(246,246,247), RGB(174,174,179), RGB(222,222,226), RGB(86,86,92), 2,false},
+    {L"Armadura Rathalos", RGB(239,232,217), RGB(250,246,235), RGB(232,224,205), RGB(219,208,184), RGB(55,48,37), RGB(122,109,88), RGB(143,104,62), RGB(190,175,147), 0,true},
+    {L"Escamas de Lagiacrus", RGB(35,42,53), RGB(44,52,65), RGB(55,65,80), RGB(68,80,98), RGB(236,241,248), RGB(172,186,205), RGB(136,192,208), RGB(91,108,131), 1,false},
+    {L"Canto de Qurupeco", RGB(22,22,39), RGB(30,30,53), RGB(42,42,70), RGB(55,55,91), RGB(235,237,255), RGB(169,174,220), RGB(122,162,247), RGB(81,84,137), 3,false},
+    {L"Tesoro de la Guilda", RGB(31,29,43), RGB(42,39,58), RGB(55,51,74), RGB(70,64,92), RGB(248,247,255), RGB(189,184,211), RGB(189,147,249), RGB(100,91,130), 1,false},
+    {L"Senda del Wyvern", RGB(40,37,32), RGB(53,49,42), RGB(68,62,51), RGB(85,77,62), RGB(251,241,213), RGB(194,180,151), RGB(250,189,47), RGB(119,106,83), 2,false},
+    {L"Lanza de Barroth", RGB(253,246,227), RGB(255,251,239), RGB(238,232,213), RGB(225,219,199), RGB(38,56,66), RGB(101,123,131), RGB(38,139,210), RGB(190,181,155), 0,true},
+    {L"Coral de Moga", RGB(0,43,54), RGB(7,54,66), RGB(14,66,79), RGB(24,82,96), RGB(238,232,213), RGB(147,161,161), RGB(42,161,152), RGB(49,104,115), 1,false},
+    {L"Cielo Escarlata", RGB(255,237,246), RGB(255,248,252), RGB(248,222,238), RGB(238,204,226), RGB(74,46,70), RGB(145,104,137), RGB(205,103,178), RGB(225,172,211), 2,true},
+    {L"Arena Dorada", RGB(232,244,255), RGB(247,251,255), RGB(219,236,251), RGB(202,224,245), RGB(31,57,82), RGB(92,124,151), RGB(49,135,219), RGB(166,202,231), 2,true},
+    {L"Cristal Celeste", RGB(237,241,222), RGB(249,251,239), RGB(222,231,199), RGB(207,219,177), RGB(52,64,40), RGB(111,126,92), RGB(112,145,62), RGB(176,192,145), 0,true},
+    {L"Gema de Ceadeus", RGB(43,14,29), RGB(62,18,39), RGB(82,23,51), RGB(105,29,64), RGB(255,238,247), RGB(222,156,186), RGB(255,54,133), RGB(146,48,91), 3,false},
+    {L"Último Rugido", RGB(7,11,24), RGB(12,17,35), RGB(18,25,48), RGB(27,36,66), RGB(234,242,255), RGB(145,165,199), RGB(111,134,255), RGB(48,65,112), 1,false},
+    {L"Dragón del Abismo", RGB(35,18,14), RGB(52,25,18), RGB(71,33,21), RGB(92,43,25), RGB(255,241,226), RGB(219,165,133), RGB(255,105,45), RGB(142,72,43), 4,false}
+}};
+
+enum class Page : uint8_t { Graphics, Appearance, Controls, System };
+enum class Dropdown : uint8_t { None, Resolution, Theme, Font, Antialiasing, FrameRate };
+SDL_Window* g_sdlWindow = nullptr;
+HWND g_hostWindow = nullptr, g_panelWindow = nullptr, g_hudWindow = nullptr;
+bool g_panelVisible = false, g_showFps = true, g_wide = true, g_fitScreen = false;
+Page g_page = Page::Graphics;
+Dropdown g_dropdown = Dropdown::None;
+int g_hover = -1, g_dropdownHover = -1, g_themeIndex = 6, g_fontIndex = 0;
+int g_resolutionScroll = 0, g_themeScroll = 0;
+int g_msaaSamples = 1;
+bool g_vsync = true;
+int g_fpsLimit = 60;
+int FrameRateIndex() {
+    const auto it = std::find(FrameRateValues.begin(), FrameRateValues.end(), g_fpsLimit);
+    return it == FrameRateValues.end() ? 2 : static_cast<int>(it - FrameRateValues.begin());
+}
+std::vector<std::pair<uint32_t,uint32_t>> g_resolutions;
+size_t g_resolutionIndex = 0;
+uint64_t g_frameCount = 0;
+double g_fps = 0.0;
+auto g_lastFpsUpdate = std::chrono::steady_clock::now();
+auto g_lastPresentedSignal = std::chrono::steady_clock::now();
+const wchar_t* CurrentFontFace() {
+    return FontFaces[static_cast<size_t>(std::clamp(g_fontIndex, 0, int(FontFaces.size()) - 1))];
+}
+
+const Theme& CurrentTheme() {
+    return Themes[static_cast<size_t>(std::clamp(g_themeIndex, 0, int(Themes.size()) - 1))];
+}
+std::filesystem::path ExecutableDirectory() {
+    wchar_t modulePath[32768]{};
+    const DWORD length = GetModuleFileNameW(nullptr, modulePath, static_cast<DWORD>(32768));
+    if (length > 0 && length < 32768)
+        return std::filesystem::path(std::wstring(modulePath, length)).parent_path();
+    return std::filesystem::current_path();
+}
+std::filesystem::path ThemeSettingsPath() { return ExecutableDirectory() / L"MH3UI.theme.v2"; }
+std::filesystem::path GraphicsSettingsPath() { return ExecutableDirectory() / L"MH3UI.graphics"; }
+void LoadGraphicsSettings() {
+    int samples = 1, vsync = 1, renderResolution = 0, fpsLimit = 60;
+    std::ifstream in(GraphicsSettingsPath());
+    if (in >> samples >> vsync) {
+        if (samples == 1 || samples == 4) g_msaaSamples = samples;
+        else g_msaaSamples = 1;
+        g_vsync = vsync != 0;
+        if (in >> renderResolution) g_resolutionIndex = static_cast<size_t>(std::clamp(renderResolution, 0, 5));
+        if (in >> fpsLimit && std::find(FrameRateValues.begin(), FrameRateValues.end(), fpsLimit) != FrameRateValues.end())
+            g_fpsLimit = fpsLimit;
+    }
+    MH3FrameRateControl::SetTargetFPS(g_fpsLimit);
+    aurora_enable_vsync(g_vsync);
+}
+void SaveGraphicsSettings() {
+    std::ofstream out(GraphicsSettingsPath(), std::ios::trunc);
+    if (out) out << g_msaaSamples << ' ' << (g_vsync ? 1 : 0) << ' ' << g_resolutionIndex << ' ' << g_fpsLimit << '\n';
+}
+void LoadTheme() {
+    std::ifstream in(ThemeSettingsPath());
+    int selected = 6, font = 0;
+    if (in >> selected && selected >= 0 && selected < static_cast<int>(Themes.size()))
+        g_themeIndex = selected;
+    if (in >> font && font >= 0 && font < static_cast<int>(FontFaces.size()))
+        g_fontIndex = font;
+}
+void SaveTheme() {
+    std::ofstream out(ThemeSettingsPath(), std::ios::trunc);
+    if (out) out << g_themeIndex << ' ' << g_fontIndex << '\n';
+}
+void FillSolid(HDC dc, RECT r, COLORREF color) {
+    HBRUSH b = CreateSolidBrush(color);
+    if (b) { ::FillRect(dc, &r, b); DeleteObject(b); }
+}
+void Line(HDC dc, int x1, int y1, int x2, int y2, COLORREF color, int width = 1) {
+    HPEN p = CreatePen(PS_SOLID, width, color);
+    if (!p) return;
+    HGDIOBJ old = SelectObject(dc, p);
+    MoveToEx(dc, x1, y1, nullptr);
+    LineTo(dc, x2, y2);
+    SelectObject(dc, old);
+    DeleteObject(p);
+}
+void DrawThemeTexture(HDC dc, const Theme& t) {
+    const COLORREF base = t.panel;
+    const COLORREF edge = t.border;
+    const COLORREF ink = RGB((GetRValue(base) * 2 + GetRValue(edge)) / 3,
+                             (GetGValue(base) * 2 + GetGValue(edge)) / 3,
+                             (GetBValue(base) * 2 + GetBValue(edge)) / 3);
+    HPEN pen = CreatePen(PS_SOLID, 1, ink);
+    if (!pen) return;
+    HGDIOBJ old = SelectObject(dc, pen);
+    const int motif = g_themeIndex % 8;
+    if (g_themeIndex == 6) {
+        for (int y = 88; y < 458; y += 13) {
+            const int drift = (y * 7) % 19;
+            Line(dc, 20 + drift, y, 466 - (drift / 3), y, ink, 1);
+        }
+        for (int i = 0; i < 11; ++i) {
+            const int x = 486 + (i % 4) * 45;
+            const int y = 112 + (i / 4) * 97;
+            Arc(dc, x, y, x + 31, y + 31, x + 4, y + 16, x + 16, y + 3);
+        }
+        Ellipse(dc, 531, 94, 653, 216);
+        Ellipse(dc, 541, 104, 643, 206);
+        Line(dc, 592, 107, 592, 203, t.border, 1);
+        Line(dc, 544, 155, 640, 155, t.border, 1);
+        SelectObject(dc, old);
+        DeleteObject(pen);
+        return;
+    }
+    switch (motif) {
+    case 0: // Mist of Moga
+        for (int i = 0; i < 6; ++i) Arc(dc, 500-i*7, 78+i*12, 682-i*4, 154+i*14, 524, 112+i*10, 654, 88+i*11);
+        break;
+    case 1: // Bubbles in deep water
+        for (int y = 94; y < 448; y += 36) for (int x = 508 + ((y/36)%2)*15; x < 666; x += 30) {
+            Ellipse(dc, x, y, x+9, y+9); Line(dc, x+2, y+2, x+4, y+2, t.hover, 1);
+        }
+        break;
+    case 2: // Forged, diagonal grain
+        for (int x = 455; x < 690; x += 18) Line(dc, x, 83, x-72, 455, ink, 1);
+        break;
+    case 3: // Guild paper crosshatch
+        for (int y = 100; y < 455; y += 24) Line(dc, 488, y, 673, y, ink, 1);
+        for (int x = 500; x < 680; x += 24) Line(dc, x, 82, x, 455, ink, 1);
+        break;
+    case 4: // Lagiacrus scales
+        for (int y = 96; y < 456; y += 23) for (int x = 500 + ((y/23)%2)*12; x < 680; x += 24)
+            Arc(dc, x, y, x+24, y+22, x, y+11, x+12, y);
+        break;
+    case 5: // Wyvern claw marks
+        for (int i = 0; i < 8; ++i) {
+            Line(dc, 530+i*18, 91, 505+i*18, 142, ink, 2);
+            Line(dc, 505+i*18, 340, 530+i*18, 391, ink, 2);
+        }
+        break;
+    case 6: // Hunter's star map
+        for (int i = 0; i < 7; ++i) {
+            const int x = 520 + (i%3)*48, y = 106 + (i/3)*104;
+            Line(dc, x-5, y, x+5, y, ink, 1); Line(dc, x, y-5, x, y+5, ink, 1);
+            Line(dc, x-3, y-3, x+3, y+3, ink, 1); Line(dc, x-3, y+3, x+3, y-3, ink, 1);
+        }
+        break;
+    default: // Volcanic contour rings
+        for (int i = 0; i < 7; ++i) Ellipse(dc, 505+i*7, 98+i*8, 603+i*11, 199+i*10);
+        break;
+    }
+    SelectObject(dc, old);
+    DeleteObject(pen);
+}
+
+void DrawTextLine(HDC dc, RECT r, const wchar_t* text, int size, COLORREF color,
+                  int weight = FW_NORMAL, UINT fmt = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS) {
+    size = std::max(size, 11);
+    HFONT f = CreateFontW(-size, 0, 0, 0, weight, FALSE, FALSE, FALSE,
+                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                          ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, CurrentFontFace());
+    if (!f) return;
+    HGDIOBJ old = SelectObject(dc, f);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, color);
+    DrawTextW(dc, text, -1, &r, fmt | DT_NOPREFIX);
+    SelectObject(dc, old);
+    DeleteObject(f);
+}
+void Text(HDC dc, int x, int y, int w, int h, const wchar_t* value, int size, COLORREF color,
+          int weight = FW_NORMAL, UINT fmt = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS) {
+    DrawTextLine(dc, RECT{x, y, x + w, y + h}, value, size, color, weight, fmt);
+}
+void DrawCard(HDC dc, RECT r, COLORREF fill, COLORREF edge, int radius = 14) {
+    const int style = CurrentTheme().style;
+    if (style == 0 || style == 2 || style == 4) {
+        const COLORREF shadow = RGB((GetRValue(CurrentTheme().bg) + GetRValue(edge)) / 2,
+                                    (GetGValue(CurrentTheme().bg) + GetGValue(edge)) / 2,
+                                    (GetBValue(CurrentTheme().bg) + GetBValue(edge)) / 2);
+        HBRUSH shadowBrush = CreateSolidBrush(shadow);
+        if (shadowBrush) {
+            HGDIOBJ old = SelectObject(dc, shadowBrush);
+            HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+            RoundRect(dc, r.left + 2, r.top + 3, r.right + 2, r.bottom + 3, radius * 2, radius * 2);
+            SelectObject(dc, oldPen); SelectObject(dc, old); DeleteObject(shadowBrush);
+        }
+    }
+    HBRUSH brush = CreateSolidBrush(fill);
+    HPEN pen = CreatePen(PS_SOLID, 1, edge);
+    if (!brush || !pen) { if (brush) DeleteObject(brush); if (pen) DeleteObject(pen); return; }
+    HGDIOBJ oldBrush = SelectObject(dc, brush);
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    RoundRect(dc, r.left, r.top, r.right, r.bottom,
+              (style == 1 ? std::max(16, radius * 2) : radius * 2),
+              (style == 1 ? std::max(16, radius * 2) : radius * 2));
+    SelectObject(dc, oldBrush); SelectObject(dc, oldPen);
+    DeleteObject(brush); DeleteObject(pen);
+    if (style == 2) { // Liquid Glass: a visible specular edge and a secondary inner rim.
+        Line(dc, r.left + radius, r.top + 2, r.right - radius, r.top + 2,
+             CurrentTheme().light ? RGB(255,255,255) : RGB(116,235,241), 2);
+        HPEN rim = CreatePen(PS_SOLID, 1, CurrentTheme().light ? RGB(255,255,255) : RGB(70,174,188));
+        if (rim) {
+            HGDIOBJ old = SelectObject(dc, rim);
+            HGDIOBJ nullBrush = GetStockObject(NULL_BRUSH);
+            HGDIOBJ oldB = SelectObject(dc, nullBrush);
+            RoundRect(dc, r.left + 3, r.top + 3, r.right - 3, r.bottom - 3, radius * 2 - 4, radius * 2 - 4);
+            SelectObject(dc, oldB); SelectObject(dc, old); DeleteObject(rim);
+        }
+    } else if (style == 0) {
+        Line(dc, r.left + radius, r.top + 2, r.right - radius, r.top + 2,
+             CurrentTheme().light ? RGB(255,255,255) : RGB(105,133,155));
+    } else if (style == 5) {
+        HPEN inner = CreatePen(PS_SOLID, 1, CurrentTheme().border);
+        if (inner) {
+            HGDIOBJ old = SelectObject(dc, inner);
+            HGDIOBJ nullBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+            RoundRect(dc, r.left + 4, r.top + 4, r.right - 4, r.bottom - 4,
+                      std::max(8, radius * 2 - 5), std::max(8, radius * 2 - 5));
+            SelectObject(dc, nullBrush); SelectObject(dc, old); DeleteObject(inner);
+        }
+    }
+}
+void DrawPill(HDC dc, RECT r, COLORREF fill, COLORREF edge) {
+    HBRUSH b = CreateSolidBrush(fill);
+    HPEN p = CreatePen(PS_SOLID, 1, edge);
+    if (!b || !p) { if (b) DeleteObject(b); if (p) DeleteObject(p); return; }
+    HGDIOBJ ob = SelectObject(dc, b), op = SelectObject(dc, p);
+    RoundRect(dc, r.left, r.top, r.right, r.bottom, r.bottom-r.top, r.bottom-r.top);
+    SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(b); DeleteObject(p);
+}
+void DrawSwitch(HDC dc, RECT r, bool on, const Theme& t) {
+    COLORREF track = on ? t.accent : t.border;
+    DrawPill(dc, r, track, track);
+    const int d = r.bottom - r.top - 6;
+    const int x = on ? r.right - d - 3 : r.left + 3;
+    HBRUSH b = CreateSolidBrush(on ? RGB(255,255,255) : t.panel);
+    HPEN p = CreatePen(PS_SOLID, 1, on ? RGB(255,255,255) : t.muted);
+    if (b && p) {
+        HGDIOBJ ob = SelectObject(dc,b), op = SelectObject(dc,p);
+        Ellipse(dc,x,r.top+3,x+d,r.bottom-3);
+        SelectObject(dc,ob); SelectObject(dc,op);
+    }
+    if (b) DeleteObject(b);
+    if (p) DeleteObject(p);
+}
+void DrawCaret(HDC dc, int cx, int cy, COLORREF color) {
+    HPEN p = CreatePen(PS_SOLID, 2, color);
+    if (!p) return;
+    HGDIOBJ old = SelectObject(dc, p);
+    MoveToEx(dc, cx - 4, cy - 2, nullptr); LineTo(dc, cx, cy + 2); LineTo(dc, cx + 4, cy - 2);
+    SelectObject(dc, old); DeleteObject(p);
+}
+void LoadResolutions() {
+    // These are internal render targets; the SDL window/fullscreen mode is configured separately.
+    g_resolutions = {{960,540}, {1280,720}, {1600,900}, {1920,1080}, {2560,1440}, {3840,2160}};
+    if (g_resolutionIndex >= g_resolutions.size()) g_resolutionIndex = 0;
+}
+
+RECT CloseRect() { return RECT{640, 21, 666, 47}; }
+RECT NavRect(int i) { return RECT{NavX, NavY + i * (NavH + NavGap), NavX + NavW, NavY + i * (NavH + NavGap) + NavH}; }
+RECT FpsRect() { return RECT{ContentX, 153, 423, 208}; }
+RECT VsyncRect() { return RECT{435, 153, ContentRight, 208}; }
+RECT ResolutionRect() { return RECT{ContentX, 218, 423, 286}; }
+RECT AntialiasingRect() { return RECT{435, 218, ContentRight, 286}; }
+RECT WideRect() { return RECT{ContentX, 297, 423, 355}; }
+RECT FitRect() { return RECT{435, 297, ContentRight, 355}; }
+RECT FrameLimitRect() { return RECT{ContentX, 370, ContentRight, 418}; }
+RECT FrameLimitButtonRect() { return RECT{486, 377, 652, 411}; }
+RECT FrameLimitPopupRect() { return RECT{430, 194, 652, 194 + 27 + DropdownRowsFrameRate * DropdownFrameRateRowH + 8}; }
+RECT ResetRect() { return RECT{ContentX, 430, ContentRight, 478}; }
+RECT ResolutionButtonRect() { return RECT{270, 238, 410, 272}; }
+RECT AntialiasingButtonRect() { return RECT{486, 238, 652, 272}; }
+RECT ThemeCardRect() { return RECT{ContentX, 153, ContentRight, 237}; }
+RECT ThemeButtonRect() { return RECT{476, 171, 646, 213}; }
+RECT FontCardRect() { return RECT{ContentX, 365, ContentRight, 431}; }
+RECT FontButtonRect() { return RECT{476, 378, 646, 416}; }
+RECT ThemePopupRect() { return RECT{360, 211, 650, 211 + 27 + DropdownRowsTheme * DropdownThemeRowH + 8}; }
+RECT ResolutionPopupRect() { return RECT{258, 265, 412, 265 + 27 + DropdownRowsResolution * DropdownResolutionRowH + 8}; }
+RECT AntialiasingPopupRect() { return RECT{468, 265, 652, 265 + 27 + DropdownRowsAntialiasing * DropdownAntialiasingRowH + 8}; }
+RECT FontPopupRect() { return RECT{425, 229, 650, 229 + 25 + DropdownRowsFont * DropdownFontRowH + 8}; }
+bool Contains(RECT r, POINT p) { return PtInRect(&r, p) != FALSE; }
+
+void ApplyWindowStyle() {
+    if (!g_panelWindow) return;
+    const Theme& t = CurrentTheme();
+    const BYTE alpha = t.style == 0 ? 246 : (t.style == 2 ? 250 : 255);
+    SetLayeredWindowAttributes(g_panelWindow, 0, alpha, LWA_ALPHA);
+    // Prefer compositor-rendered Win11 corners; use a rounded region on older Windows.
+    const DWORD roundPreference = 2; // DWMWCP_ROUND
+    const HRESULT cornerStatus = DwmSetWindowAttribute(g_panelWindow, 33, &roundPreference, sizeof(roundPreference));
+    if (SUCCEEDED(cornerStatus)) {
+        SetWindowRgn(g_panelWindow, nullptr, TRUE);
+    } else {
+        const int diameter = 56;
+        SetWindowRgn(g_panelWindow, CreateRoundRectRgn(0, 0, PanelWidth + 1, PanelHeight + 1, diameter, diameter), TRUE);
+    }
+    DWM_BLURBEHIND blur{};
+    blur.dwFlags = DWM_BB_ENABLE;
+    blur.fEnable = t.style == 0;
+    DwmEnableBlurBehindWindow(g_panelWindow, &blur);
+    MARGINS margins = t.style == 0 ? MARGINS{1,1,1,1} : MARGINS{0,0,0,0};
+    DwmExtendFrameIntoClientArea(g_panelWindow, &margins);
+}
+void SetBackdropArt(HDC dc, const Theme& t) {
+    RECT bounds{0,0,PanelWidth,PanelHeight};
+    FillSolid(dc, bounds, t.bg);
+    if (t.style == 1) {
+        FillSolid(dc, RECT{0,0,6,PanelHeight}, t.accent);
+    } else if (t.style == 5) {
+        FillSolid(dc, RECT{0,0,PanelWidth,PanelHeight}, t.bg);
+        for (int y = 6; y < PanelHeight; y += 6)
+            Line(dc, 8, y, PanelWidth - 8, y, RGB(222,204,158), 1);
+    }
+    RECT outer{8,8,PanelWidth-8,PanelHeight-8};
+    DrawCard(dc, outer, t.panel, t.border, 24);
+    DrawThemeTexture(dc, t);
+    if (t.style == 0) {
+        // Soft mist: low-contrast concentric arcs, without glossy glass reflections.
+        HPEN mist = CreatePen(PS_SOLID, 1, t.border);
+        if (mist) { HGDIOBJ old=SelectObject(dc,mist); Arc(dc,505,78,692,155,528,116,664,94); Arc(dc,513,85,681,148,535,118,657,98); SelectObject(dc,old); DeleteObject(mist); }
+    } else if (t.style == 2) {
+        // Liquid glass: aqua specular highlights and layered reflective edges.
+        HPEN shine = CreatePen(PS_SOLID, 2, t.accent);
+        if (shine) { HGDIOBJ old=SelectObject(dc,shine); Arc(dc,495,75,699,162,517,123,678,88); Arc(dc,506,84,689,153,530,119,665,98); Line(dc,545,84,641,84,t.light?RGB(255,255,255):t.accent,2); SelectObject(dc,old); DeleteObject(shine); }
+    }
+}
+void DrawHeader(HDC dc, const Theme& t) {
+    DrawPill(dc, RECT{24,21,62,59}, t.accent, t.accent);
+    Text(dc, 24, 22, 38, 36, L"MH", 12, RGB(255,255,255), FW_BOLD, DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+    Text(dc, 74, 20, 400, 17, L"MONSTER HUNTER TRI", 10, t.accent, FW_BOLD);
+    Text(dc, 73, 36, 400, 27, L"Ajustes", 21, t.ink, FW_SEMIBOLD);
+    if (g_showFps) {
+        DrawCard(dc, RECT{531,24,628,48}, t.card, t.border, 8);
+        std::wstring fpsLabel = L"FPS  --";
+        if (g_fps > 0.0) fpsLabel = L"FPS  " + std::to_wstring(static_cast<unsigned>(g_fps+0.5));
+        Text(dc, 536, 25, 86, 22, fpsLabel.c_str(), 10, t.accent, FW_SEMIBOLD, DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+    }
+    DrawCard(dc, CloseRect(), t.card, t.border, 9);
+    Line(dc, 648, 30, 658, 40, t.ink, 2); Line(dc, 658, 30, 648, 40, t.ink, 2);
+    Line(dc, 22, 76, PanelWidth-22, 76, t.border);
+}
+void DrawNavigation(HDC dc, const Theme& t) {
+    const wchar_t* names[] = {L"Gráficos", L"Apariencia", L"Controles", L"Sistema"};
+    const int ids[] = {100,101,102,103};
+    for (int i=0;i<4;++i) {
+        const RECT r=NavRect(i); const bool active=(static_cast<int>(g_page)==i);
+        const bool over=(g_hover==ids[i]);
+        DrawCard(dc, r, active ? t.hover : (over ? t.card : t.panel), active ? t.accent : t.border, 11);
+        if (active) DrawPill(dc, RECT{r.left+9,r.top+10,r.left+13,r.bottom-10}, t.accent, t.accent);
+        Text(dc,r.left+22,r.top+1,r.right-r.left-29,r.bottom-r.top-2,names[i],13,t.ink,active?FW_SEMIBOLD:FW_NORMAL);
+    }
+    Text(dc, 25, 458, 148, 18, L"ESC  /  F1", 10, t.muted, FW_BOLD);
+    Text(dc, 25, 475, 148, 25, L"Volver al juego", 10, t.muted);
+}
+void DrawPageHeading(HDC dc, const Theme& t, const wchar_t* title, const wchar_t* subtitle) {
+    Text(dc, ContentX, 91, ContentRight-ContentX, 29, title, 21, t.ink, FW_SEMIBOLD);
+    Text(dc, ContentX, 121, ContentRight-ContentX, 20, subtitle, 11, t.muted);
+}
+void DrawGraphicsPage(HDC dc, const Theme& t) {
+    DrawPageHeading(dc,t,L"Gráficos",L"Pantalla, suavizado y presentación");
+
+    DrawCard(dc,FpsRect(),g_hover==20?t.hover:t.card,t.border,14);
+    Text(dc,210,159,168,20,L"Contador de FPS",13,t.ink,FW_SEMIBOLD);
+    Text(dc,210,181,166,16,L"Mostrar rendimiento",10,t.muted);
+    DrawSwitch(dc,RECT{374,169,409,191},g_showFps,t);
+
+    DrawCard(dc,VsyncRect(),g_hover==22?t.hover:t.card,t.border,14);
+    Text(dc,447,159,132,20,L"V-Sync",13,t.ink,FW_SEMIBOLD);
+    Text(dc,447,181,156,16,L"Aplicación inmediata",10,t.muted);
+    DrawSwitch(dc,RECT{607,169,649,191},g_vsync,t);
+
+    DrawCard(dc,ResolutionRect(),g_hover==21?t.hover:t.card,t.border,14);
+    Text(dc,210,226,130,20,L"Resolución",13,t.ink,FW_SEMIBOLD);
+    Text(dc,210,249,118,16,L"Renderizado interno",10,t.muted);
+    const auto r = g_resolutions.empty() ? std::make_pair(960u,540u) : g_resolutions[std::min(g_resolutionIndex,g_resolutions.size()-1)];
+    DrawCard(dc,ResolutionButtonRect(),g_dropdown==Dropdown::Resolution?t.hover:t.panel,t.accent,11);
+    const std::wstring resolutionLabel = std::to_wstring(r.first) + L" × " + std::to_wstring(r.second);
+    Text(dc,275,239,129,32,resolutionLabel.c_str(),11,t.ink,FW_SEMIBOLD,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
+    DrawCaret(dc,399,255,t.accent);
+
+    DrawCard(dc,AntialiasingRect(),t.card,t.border,14);
+    Text(dc,447,226,200,20,L"Antialiasing",13,t.ink,FW_SEMIBOLD);
+    Text(dc,447,248,208,16,L"Este renderer no tiene MSAA.",10,t.muted);
+    Text(dc,447,264,208,16,L"Sube la Resolución (SSAA).",10,t.muted);
+
+    DrawCard(dc,WideRect(),g_hover==23?t.hover:t.card,t.border,14);
+    Text(dc,210,305,146,20,L"Relación 16:9",12,t.ink,FW_SEMIBOLD);
+    Text(dc,210,328,148,15,L"Proporción panorámica",9,t.muted);
+    DrawSwitch(dc,RECT{374,314,409,336},g_wide,t);
+
+    DrawCard(dc,FitRect(),g_hover==24?t.hover:t.card,t.border,14);
+    Text(dc,447,305,146,20,L"Maximizar ventana",12,t.ink,FW_SEMIBOLD);
+    Text(dc,447,328,150,15,L"Ajustar a la pantalla",9,t.muted);
+    DrawSwitch(dc,RECT{607,314,649,336},g_fitScreen,t);
+
+    DrawCard(dc,FrameLimitRect(),g_hover==27?t.hover:t.card,t.border,14);
+    Text(dc,210,376,235,20,L"Límite de FPS",13,t.ink,FW_SEMIBOLD);
+    Text(dc,210,398,250,15,L"La simulación conserva el tiempo real",9,t.muted);
+    DrawCard(dc,FrameLimitButtonRect(),g_dropdown==Dropdown::FrameRate?t.hover:t.panel,t.accent,11);
+    Text(dc,491,378,125,31,FrameRateNames[static_cast<size_t>(FrameRateIndex())],11,t.ink,FW_SEMIBOLD,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
+    DrawCaret(dc,640,394,t.accent);
+
+    DrawCard(dc,ResetRect(),g_hover==25?t.hover:t.panel,t.border,14);
+    Text(dc,ContentX+12,ResetRect().top+3,ContentRight-ContentX-24,ResetRect().bottom-ResetRect().top-6,
+         L"Restaurar ajustes predeterminados",12,t.accent,FW_SEMIBOLD,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+}
+const wchar_t* StyleName(const Theme& t) {
+    switch (t.style) {
+        case 0: return L"Neblina de Moga · acabado satinado";
+        case 1: return L"Acero de Barroth · superficies sólidas";
+        case 2: return L"Cristal líquido · reflejos acuáticos";
+        case 3: return L"Estilo minimalista · acabado sobrio";
+        case 5: return L"Pergamino de la Guilda · papel de cazador";
+        default: return L"Estilo de caza";
+    }
+}
+void DrawAppearancePage(HDC dc, const Theme& t) {
+    DrawPageHeading(dc,t,L"Apariencia",L"Diseño y tipografía");
+    DrawCard(dc,ThemeCardRect(),g_hover==30?t.hover:t.card,t.border,16);
+    Text(dc,216,162,230,16,L"TEMA ACTUAL",10,t.muted,FW_BOLD);
+    Text(dc,216,181,252,25,CurrentTheme().name,16,t.ink,FW_SEMIBOLD);
+    DrawCard(dc,ThemeButtonRect(),g_dropdown==Dropdown::Theme?t.hover:t.panel,t.accent,13);
+    Text(dc,484,175,151,34,L"Elegir tema",12,t.ink,FW_SEMIBOLD,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+
+    const int x0=ContentX+18, gap=10, sw=136, y0=254, y1=322;
+    const COLORREF colors[]={t.bg,t.panel,t.accent};
+    const wchar_t* labels[]={L"Fondo",L"Panel",L"Acento"};
+    for(int i=0;i<3;++i){
+        RECT r{x0+i*(sw+gap),y0,x0+i*(sw+gap)+sw,y1};
+        DrawCard(dc,r,t.card,t.border,12);
+        RECT swatch{r.left+8,r.top+8,r.right-8,r.top+39};
+        DrawPill(dc,swatch,colors[i],t.border);
+        Text(dc,r.left+9,r.top+42,r.right-r.left-18,18,labels[i],11,t.ink,FW_SEMIBOLD);
+    }
+    Text(dc,ContentX,333,ContentRight-ContentX,22,StyleName(t),12,t.accent,FW_SEMIBOLD);
+
+    DrawCard(dc,FontCardRect(),g_hover==31?t.hover:t.card,t.border,15);
+    Text(dc,216,371,235,22,L"Fuente de interfaz",13,t.ink,FW_SEMIBOLD);
+    Text(dc,216,394,245,18,L"Tipografía del menú y los FPS.",11,t.muted);
+    DrawCard(dc,FontButtonRect(),g_dropdown==Dropdown::Font?t.hover:t.panel,t.accent,12);
+    Text(dc,484,380,137,33,CurrentFontFace(),12,t.ink,FW_SEMIBOLD,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
+    DrawCaret(dc,632,397,t.accent);
+}
+void DrawKeyChip(HDC dc, RECT r, const wchar_t* label, const Theme& t) {
+    DrawCard(dc,r,t.panel,t.border,8);
+    Text(dc,r.left+5,r.top+2,r.right-r.left-10,r.bottom-r.top-4,label,10,t.accent,FW_BOLD,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+}
+void DrawControlsPage(HDC dc, const Theme& t) {
+    DrawPageHeading(dc,t,L"Controles",L"Atajos y navegación del panel.");
+    const RECT rows[] = {RECT{ContentX,153,ContentRight,211},RECT{ContentX,222,ContentRight,280},RECT{ContentX,291,ContentRight,349}};
+    const wchar_t* titles[] = {L"Abrir o cerrar ajustes",L"Seleccionar una opción",L"Cerrar un desplegable"};
+    const wchar_t* desc[] = {L"Alterna el panel mientras juegas.",L"Usa el ratón para activar una opción.",L"Cierra la lista sin cambiar el valor."};
+    const wchar_t* chips[] = {L"ESC  /  F1",L"CLIC",L"ESC"};
+    for(int i=0;i<3;++i){
+        DrawCard(dc,rows[i],g_hover==40+i?t.hover:t.card,t.border,13);
+        Text(dc,216,rows[i].top+7,310,22,titles[i],13,t.ink,FW_SEMIBOLD);
+        Text(dc,216,rows[i].top+30,310,18,desc[i],10,t.muted);
+        DrawKeyChip(dc,RECT{544,rows[i].top+14,644,rows[i].top+42},chips[i],t);
+    }
+    Text(dc,ContentX,450,ContentRight-ContentX,24,L"V-Sync se aplica al instante; el límite no cambia la velocidad de la simulación.",10,t.muted);
+}
+
+struct LangChoice { const wchar_t* label; const char* code; };
+constexpr std::array<LangChoice, 5> LangChoices{{
+    {L"Español", "es"}, {L"English", "en"}, {L"Français", "fr"}, {L"Deutsch", "de"}, {L"Italiano", "it"}
+}};
+int g_langChoice = -1, g_langAtLaunch = -1;
+std::filesystem::path LanguageSettingsPath() { return ExecutableDirectory() / L"MH3UI.language"; }
+void LoadLanguage() {
+    std::ifstream in(LanguageSettingsPath());
+    std::string code;
+    if (in >> code)
+        for (size_t i = 0; i < LangChoices.size(); ++i)
+            if (code == LangChoices[i].code) { g_langChoice = int(i); break; }
+    g_langAtLaunch = g_langChoice;
+}
+void SaveLanguage() {
+    if (g_langChoice < 0 || g_langChoice >= int(LangChoices.size())) return;
+    std::ofstream out(LanguageSettingsPath(), std::ios::trunc);
+    if (out) out << LangChoices[static_cast<size_t>(g_langChoice)].code << '\n';
+}
+void ApplyLanguageToGame() {
+    if (g_langChoice < 0 || g_langChoice >= int(LangChoices.size())) return;
+    const std::string_view code = LangChoices[static_cast<size_t>(g_langChoice)].code;
+    for (const auto& language : GameLanguages())
+        if (code == language.code) { SetLanguageSetting(language.system); break; }
+}
+// Se ejecuta antes de main(): el juego lee el idioma una sola vez al arrancar.
+struct EarlyLanguage { EarlyLanguage() { LoadLanguage(); ApplyLanguageToGame(); } };
+const EarlyLanguage g_earlyLanguage;
+
+void ChooseLanguage(int i) {
+    if (i < 0 || i >= int(LangChoices.size())) return;
+    g_langChoice = i;
+    SaveLanguage();
+}
+std::filesystem::path SavesDirectory() {
+    if (const char* user = std::getenv("MH3_USER_DIR"); user && *user) return std::filesystem::path(user);
+    return ExecutableDirectory() / L"Saves";
+}
+void OpenFolder(const std::filesystem::path& folder) {
+    std::error_code ec;
+    std::filesystem::create_directories(folder, ec);
+    const std::wstring target = folder.wstring();
+    ShellExecuteW(nullptr, L"open", target.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+void RestartPort() {
+    SaveGraphicsSettings(); SaveTheme(); SaveLanguage();
+    wchar_t exe[32768]{};
+    const DWORD n = GetModuleFileNameW(nullptr, exe, 32768);
+    if (n == 0 || n >= 32768) return;
+    const wchar_t* args = GetCommandLineW();
+    if (!args) args = L"";
+    if (*args == L'"') { ++args; while (*args && *args != L'"') ++args; if (*args) ++args; }
+    else { while (*args && *args != L' ') ++args; }
+    // Espera ~2 s a que este proceso termine y vuelve a abrir el port con los mismos argumentos.
+    std::wstring command = L"cmd.exe /c ping -n 3 127.0.0.1 >nul & \"" + std::wstring(exe, n) + L"\"" + args;
+    std::vector<wchar_t> buffer(command.begin(), command.end());
+    buffer.push_back(L'\0');
+    const std::wstring dir = ExecutableDirectory().wstring();
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, buffer.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, dir.c_str(), &si, &pi)) return;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    std::fflush(nullptr);
+    std::_Exit(0);
+}
+bool RestartPending() { return g_langChoice != g_langAtLaunch; }
+RECT LangChipRect(int i) { const int x = 210 + i * 90; return RECT{x, 205, x + 84, 243}; }
+RECT RestartButtonRect() { return RECT{498, 288, 652, 324}; }
+RECT SavesCardRect() { return RECT{ContentX, 347, 431, 405}; }
+RECT PortCardRect() { return RECT{443, 347, ContentRight, 405}; }
+int SystemHit(POINT p) {
+    for (int i = 0; i < int(LangChoices.size()); ++i) if (Contains(LangChipRect(i), p)) return 50 + i;
+    if (Contains(RestartButtonRect(), p)) return 60;
+    if (Contains(SavesCardRect(), p)) return 61;
+    if (Contains(PortCardRect(), p)) return 62;
+    return -1;
+}
+void DrawSystemPage(HDC dc, const Theme& t) {
+    DrawPageHeading(dc, t, L"Sistema", L"Idioma, guardados y reinicio");
+
+    DrawCard(dc, RECT{ContentX, 153, ContentRight, 265}, t.card, t.border, 16);
+    Text(dc, 216, 160, 300, 20, L"Idioma del juego", 13, t.ink, FW_SEMIBOLD);
+    Text(dc, 216, 181, 430, 16, L"Texto y menús del disco europeo. Requiere reiniciar.", 10, t.muted);
+    for (int i = 0; i < int(LangChoices.size()); ++i) {
+        const bool selected = (g_langChoice == i), over = (g_hover == 50 + i);
+        const RECT r = LangChipRect(i);
+        DrawCard(dc, r, selected ? t.accent : (over ? t.hover : t.panel), selected ? t.accent : t.border, 11);
+        Text(dc, r.left + 4, r.top + 2, r.right - r.left - 8, r.bottom - r.top - 4, LangChoices[static_cast<size_t>(i)].label, 12,
+             selected ? RGB(255, 255, 255) : t.ink, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    std::wstring status;
+    COLORREF statusColor = t.muted;
+    if (RestartPending()) { status = L"Reinicia el port para aplicar el cambio de idioma."; statusColor = t.accent; }
+    else if (g_langChoice >= 0) status = std::wstring(L"Idioma activo: ") + LangChoices[static_cast<size_t>(g_langChoice)].label;
+    else status = L"Idioma activo: el del sistema (automático).";
+    Text(dc, 216, 247, 430, 16, status.c_str(), 10, statusColor, RestartPending() ? FW_BOLD : FW_NORMAL);
+
+    DrawCard(dc, RECT{ContentX, 277, ContentRight, 335}, t.card, t.border, 16);
+    Text(dc, 216, 284, 270, 20, L"Reiniciar el port", 13, t.ink, FW_SEMIBOLD);
+    Text(dc, 216, 306, 270, 16, L"Cierra y vuelve a abrir el juego.", 10, t.muted);
+    const bool pending = RestartPending(), overRestart = (g_hover == 60);
+    DrawCard(dc, RestartButtonRect(), pending ? t.accent : (overRestart ? t.hover : t.panel), t.accent, 12);
+    Text(dc, 504, 290, 142, 32, L"Reiniciar ahora", 12, pending ? RGB(255, 255, 255) : t.accent, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    DrawCard(dc, SavesCardRect(), g_hover == 61 ? t.hover : t.card, t.border, 14);
+    Text(dc, 212, 353, 210, 20, L"Guardados", 13, t.ink, FW_SEMIBOLD);
+    Text(dc, 212, 376, 210, 16, L"Abrir la carpeta Saves", 10, t.muted);
+    DrawCard(dc, PortCardRect(), g_hover == 62 ? t.hover : t.card, t.border, 14);
+    Text(dc, 457, 353, 200, 20, L"Carpeta del port", 13, t.ink, FW_SEMIBOLD);
+    Text(dc, 457, 376, 200, 16, L"Donde está MH3.exe", 10, t.muted);
+    Text(dc, ContentX, 418, ContentRight - ContentX, 34, L"Consejo: haz una copia de Saves antes de actualizar el port.", 10, t.muted);
+}
+RECT DropdownRect() {
+    if(g_dropdown==Dropdown::Theme) return ThemePopupRect();
+    if(g_dropdown==Dropdown::Font) return FontPopupRect();
+    if(g_dropdown==Dropdown::Antialiasing) return AntialiasingPopupRect();
+    if(g_dropdown==Dropdown::FrameRate) return FrameLimitPopupRect();
+    return ResolutionPopupRect();
+}
+int DropdownMaxScroll() {
+    if(g_dropdown==Dropdown::Theme) return std::max(0,int(Themes.size())-DropdownRowsTheme);
+    if(g_dropdown==Dropdown::Resolution) return std::max(0,int(g_resolutions.size())-DropdownRowsResolution);
+    if(g_dropdown==Dropdown::FrameRate) return std::max(0,int(FrameRateNames.size())-DropdownRowsFrameRate);
+    return 0;
+}
+int DropdownVisibleRows() {
+    if(g_dropdown==Dropdown::Theme) return DropdownRowsTheme;
+    if(g_dropdown==Dropdown::Font) return DropdownRowsFont;
+    if(g_dropdown==Dropdown::Antialiasing) return DropdownRowsAntialiasing;
+    if(g_dropdown==Dropdown::FrameRate) return DropdownRowsFrameRate;
+    return DropdownRowsResolution;
+}
+int DropdownRowHeight() {
+    if(g_dropdown==Dropdown::Theme) return DropdownThemeRowH;
+    if(g_dropdown==Dropdown::Font) return DropdownFontRowH;
+    if(g_dropdown==Dropdown::Antialiasing) return DropdownAntialiasingRowH;
+    if(g_dropdown==Dropdown::FrameRate) return DropdownFrameRateRowH;
+    return DropdownResolutionRowH;
+}
+int DropdownTopScroll() {
+    if(g_dropdown==Dropdown::Theme) return g_themeScroll;
+    if(g_dropdown==Dropdown::Resolution) return g_resolutionScroll;
+    return 0;
+}
+void SetDropdownScroll(int value) {
+    value=std::clamp(value,0,DropdownMaxScroll());
+    if(g_dropdown==Dropdown::Theme)g_themeScroll=value;else if(g_dropdown==Dropdown::Resolution)g_resolutionScroll=value;
+}
+void OpenDropdown(Dropdown d) {
+    g_dropdown=d;g_dropdownHover=-1;
+    if(d==Dropdown::Theme) g_themeScroll=std::clamp(g_themeIndex-2,0,std::max(0,int(Themes.size())-DropdownRowsTheme));
+    else if(d==Dropdown::Resolution) g_resolutionScroll=std::clamp(int(g_resolutionIndex)-1,0,std::max(0,int(g_resolutions.size())-DropdownRowsResolution));
+}
+int DropdownItemAt(POINT p) {
+    if(g_dropdown==Dropdown::None || !Contains(DropdownRect(),p))return -1;
+    const RECT r=DropdownRect();
+    const int top=r.top+25;
+    const int row= (p.y-top)/DropdownRowHeight();
+    if(p.y<top || row<0 || row>=DropdownVisibleRows())return -1;
+    const int idx=DropdownTopScroll()+row;
+    const int count=g_dropdown==Dropdown::Theme?int(Themes.size()):g_dropdown==Dropdown::Font?int(FontFaces.size()):g_dropdown==Dropdown::Antialiasing?int(AntialiasingNames.size()):g_dropdown==Dropdown::FrameRate?int(FrameRateNames.size()):int(g_resolutions.size());
+    return idx>=0&&idx<count?idx:-1;
+}
+void DrawDropdown(HDC dc,const Theme& t) {
+    if(g_dropdown==Dropdown::None)return;
+    const RECT r=DropdownRect();
+    DrawCard(dc,r,t.panel,t.accent,12);
+    const wchar_t* caption=g_dropdown==Dropdown::Theme?L"TEMAS":g_dropdown==Dropdown::Font?L"TIPOGRAFÍA":g_dropdown==Dropdown::Antialiasing?L"ANTIALIASING":g_dropdown==Dropdown::FrameRate?L"LÍMITE DE FPS":L"RESOLUCIÓN";
+    Text(dc,r.left+10,r.top+3,r.right-r.left-20,21,caption,9,t.accent,FW_BOLD);
+    const int rowH=DropdownRowHeight(),rows=DropdownVisibleRows(),first=DropdownTopScroll();
+    for(int i=0;i<rows;++i){
+        const int idx=first+i;
+        const int y=r.top+25+i*rowH;
+        RECT item{r.left+6,y,r.right-6,y+rowH-1};
+        const bool selected=(g_dropdown==Dropdown::Theme?idx==g_themeIndex:g_dropdown==Dropdown::Font?idx==g_fontIndex:g_dropdown==Dropdown::Antialiasing?g_msaaSamples==(idx==0?1:4):g_dropdown==Dropdown::FrameRate?FrameRateValues[static_cast<size_t>(idx)]==g_fpsLimit:idx==int(g_resolutionIndex));
+        if(selected || g_dropdownHover==idx) DrawCard(dc,item,selected?t.hover:t.card,selected?t.accent:t.border,7);
+        std::wstring label;
+        if(g_dropdown==Dropdown::Theme) label=Themes[static_cast<size_t>(idx)].name;
+        else if(g_dropdown==Dropdown::Font) label=FontFaces[static_cast<size_t>(idx)];
+        else if(g_dropdown==Dropdown::Antialiasing) label=AntialiasingNames[static_cast<size_t>(idx)];
+        else if(g_dropdown==Dropdown::FrameRate) label=FrameRateNames[static_cast<size_t>(idx)];
+        else if(idx<int(g_resolutions.size())) label=std::to_wstring(g_resolutions[static_cast<size_t>(idx)].first)+L" × "+std::to_wstring(g_resolutions[static_cast<size_t>(idx)].second);
+        Text(dc,item.left+8,item.top,item.right-item.left-16,item.bottom-item.top,label.c_str(),10,selected?t.accent:t.ink,selected?FW_SEMIBOLD:FW_NORMAL);
+    }
+    const int total=g_dropdown==Dropdown::Theme?int(Themes.size()):g_dropdown==Dropdown::Font?int(FontFaces.size()):g_dropdown==Dropdown::Antialiasing?int(AntialiasingNames.size()):g_dropdown==Dropdown::FrameRate?int(FrameRateNames.size()):int(g_resolutions.size());
+    if(total>rows){
+        const int railX=r.right-5,railTop=r.top+27,railH=rows*rowH;
+        FillSolid(dc,RECT{railX,railTop,railX+2,railTop+railH},t.border);
+        const int thumbH=std::max(18,railH*rows/total);
+        const int thumbY=railTop+(railH-thumbH)*first/std::max(1,total-rows);
+        DrawPill(dc,RECT{railX-1,thumbY,railX+3,thumbY+thumbH},t.accent,t.accent);
+    }
+}
+void PaintPanel(HWND w) {
+    PAINTSTRUCT ps{}; HDC target=BeginPaint(w,&ps); if(!target)return;
+    HDC dc=CreateCompatibleDC(target);
+    HBITMAP bitmap=CreateCompatibleBitmap(target,PanelWidth*3,PanelHeight*3);
+    if(!dc || !bitmap) { if(bitmap)DeleteObject(bitmap); if(dc)DeleteDC(dc); EndPaint(w,&ps); return; }
+    HGDIOBJ oldBitmap=SelectObject(dc,bitmap);
+    SetMapMode(dc,MM_ANISOTROPIC);
+    SetWindowExtEx(dc,PanelWidth,PanelHeight,nullptr);
+    SetViewportExtEx(dc,PanelWidth*3,PanelHeight*3,nullptr);
+    const Theme& t=CurrentTheme();
+    SetBackdropArt(dc,t);
+    DrawHeader(dc,t); DrawNavigation(dc,t);
+    switch(g_page){case Page::Graphics:DrawGraphicsPage(dc,t);break;case Page::Appearance:DrawAppearancePage(dc,t);break;case Page::Controls:DrawControlsPage(dc,t);break;case Page::System:DrawSystemPage(dc,t);break;}
+    DrawDropdown(dc,t);
+    SetStretchBltMode(target,HALFTONE); SetBrushOrgEx(target,0,0,nullptr);
+    StretchBlt(target,0,0,PanelWidth,PanelHeight,dc,0,0,PanelWidth,PanelHeight,SRCCOPY);
+    SelectObject(dc,oldBitmap);DeleteObject(bitmap);DeleteDC(dc);EndPaint(w,&ps);
+}
+void PositionPanel() {
+    if(!g_hostWindow||!IsWindow(g_hostWindow)||!g_panelWindow||!g_panelVisible)return;
+    RECT c{};if(!GetClientRect(g_hostWindow,&c))return;POINT o{0,0};ClientToScreen(g_hostWindow,&o);
+    const int aw=static_cast<int>(c.right-c.left),ah=static_cast<int>(c.bottom-c.top);
+    const int x=o.x+std::max(0,(aw-PanelWidth)/2),y=o.y+std::max(0,(ah-PanelHeight)/2);
+    SetWindowPos(g_panelWindow,HWND_TOP,x,y,PanelWidth,PanelHeight,SWP_NOACTIVATE|SWP_SHOWWINDOW);
+}
+void PositionHud() {
+    if(!g_showFps||!g_hostWindow||!IsWindow(g_hostWindow)||!g_hudWindow)return;
+    RECT c{};if(!GetClientRect(g_hostWindow,&c))return;POINT o{0,0};ClientToScreen(g_hostWindow,&o);
+    const int x=o.x+std::max(8,static_cast<int>(c.right)-HudWidth-18),y=o.y+14;
+    // An owned, non-activating popup remains above the game without becoming topmost over other apps.
+    SetWindowPos(g_hudWindow,HWND_TOPMOST,x,y,HudWidth,HudHeight,SWP_NOACTIVATE|SWP_SHOWWINDOW);
+}
+void SetVisible(bool visible) {
+    g_panelVisible=visible;
+    if(!g_panelWindow)return;
+    if(visible){g_dropdown=Dropdown::None;g_page=Page::Graphics;g_hover=-1;if(g_hudWindow)ShowWindow(g_hudWindow,SW_HIDE);ApplyWindowStyle();PositionPanel();ShowWindow(g_panelWindow,SW_SHOWNORMAL);SetWindowPos(g_panelWindow,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW);SetForegroundWindow(g_panelWindow);SetFocus(g_panelWindow);InvalidateRect(g_panelWindow,nullptr,FALSE);}
+    else{g_dropdown=Dropdown::None;ShowWindow(g_panelWindow,SW_HIDE);if(g_hostWindow&&IsWindow(g_hostWindow))SetForegroundWindow(g_hostWindow);if(g_showFps&&g_hudWindow){ShowWindow(g_hudWindow,SW_SHOWNOACTIVATE);PositionHud();SetWindowPos(g_hudWindow,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_SHOWWINDOW);InvalidateRect(g_hudWindow,nullptr,TRUE);}}
+}
+void ToggleVisible(){SetVisible(!g_panelVisible);}
+constexpr std::array<float, 6> RenderScales{{540.0f/448.0f, 720.0f/448.0f, 900.0f/448.0f, 1080.0f/448.0f, 1440.0f/448.0f, 2160.0f/448.0f}};
+constexpr std::array<const char*, 6> RenderScaleEnvironmentValues{{"1.2053571", "1.6071429", "2.0089286", "2.4107143", "3.2142857", "4.8214286"}};
+void ApplyRenderResolution(int idx) {
+    if(g_resolutions.empty()) LoadResolutions();
+    if(g_resolutions.empty()) return;
+    g_resolutionIndex=static_cast<size_t>(std::clamp(idx,0,int(g_resolutions.size())-1));
+    const size_t scaleIndex=std::min(g_resolutionIndex,RenderScales.size()-1);
+    // Aurora's VISetFrameBufferScale schedules an ordered framebuffer/swapchain resize.
+    // This changes the 3D render target, not the SDL window dimensions.
+    VISetFrameBufferScale(RenderScales[scaleIndex]);
+#ifdef _WIN32
+    _putenv_s("MH3_RENDER_SCALE", RenderScaleEnvironmentValues[scaleIndex]);
+#else
+    setenv("MH3_RENDER_SCALE", RenderScaleEnvironmentValues[scaleIndex], 1);
+#endif
+    SaveGraphicsSettings();
+    if(g_panelWindow) InvalidateRect(g_panelWindow,nullptr,FALSE);
+}
+void ChangeResolutionTo(int idx) {
+    ApplyRenderResolution(idx);
+    PositionPanel();
+}
+void ChangeFrameLimitTo(int idx) {
+    if(idx<0 || idx>=static_cast<int>(FrameRateValues.size())) return;
+    g_fpsLimit=FrameRateValues[static_cast<size_t>(idx)];
+    MH3FrameRateControl::SetTargetFPS(g_fpsLimit);
+    SaveGraphicsSettings();
+    if(g_panelWindow)InvalidateRect(g_panelWindow,nullptr,FALSE);
+}
+void ToggleFps() {
+    g_showFps=!g_showFps;RuntimeConfigFile::SetShowFps(g_showFps);
+    if(g_showFps){if(g_hudWindow){g_frameCount=0;g_fps=0.0;g_lastFpsUpdate=std::chrono::steady_clock::now();g_lastPresentedSignal=g_lastFpsUpdate;if(!g_panelVisible){ShowWindow(g_hudWindow,SW_SHOWNOACTIVATE);PositionHud();SetWindowPos(g_hudWindow,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_SHOWWINDOW);}InvalidateRect(g_hudWindow,nullptr,TRUE);}}
+    else if(g_hudWindow)ShowWindow(g_hudWindow,SW_HIDE);
+    if(g_panelWindow)InvalidateRect(g_panelWindow,nullptr,FALSE);
+}
+void ToggleWide(){g_wide=!g_wide;if(g_sdlWindow){if(g_wide)SDL_SetWindowAspectRatio(g_sdlWindow,16.0f/9.0f,16.0f/9.0f);else SDL_SetWindowAspectRatio(g_sdlWindow,0.0f,0.0f);}}
+void ToggleFit(){g_fitScreen=!g_fitScreen;if(g_sdlWindow){if(g_fitScreen)SDL_MaximizeWindow(g_sdlWindow);else SDL_RestoreWindow(g_sdlWindow);}}
+void ToggleVsync() {
+    g_vsync=!g_vsync; aurora_enable_vsync(g_vsync);
+    aurora_enable_vsync(g_vsync);
+    SaveGraphicsSettings();
+    if(g_panelWindow)InvalidateRect(g_panelWindow,nullptr,FALSE);
+}
+void ApplyAntialiasingSelection(int idx) {
+    if(idx<0 || idx>=static_cast<int>(AntialiasingNames.size()))return;
+    g_msaaSamples = idx==0 ? 1 : 4;
+    SaveGraphicsSettings();
+    if(g_panelWindow)InvalidateRect(g_panelWindow,nullptr,FALSE);
+}
+void ResetSettings() {
+    g_themeIndex=6; g_fontIndex=0; SaveTheme();
+    g_showFps=true; RuntimeConfigFile::SetShowFps(true);
+    g_vsync=true; aurora_enable_vsync(true); g_msaaSamples=1; g_resolutionIndex=0; g_fpsLimit=60; MH3FrameRateControl::SetTargetFPS(60);
+    ApplyRenderResolution(0);
+    g_wide=true; g_fitScreen=false;
+    RuntimeConfigFile::SetWindowSize(960,544);
+    if(g_sdlWindow) {
+        SDL_SetWindowFullscreen(g_sdlWindow,false);
+        SDL_RestoreWindow(g_sdlWindow);
+        SDL_SetWindowSize(g_sdlWindow,960,544);
+        SDL_SetWindowPosition(g_sdlWindow,SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED);
+        SDL_SetWindowAspectRatio(g_sdlWindow,16.0f/9.0f,16.0f/9.0f);
+    }
+    SaveGraphicsSettings();
+    g_dropdown=Dropdown::None; g_dropdownHover=-1; g_page=Page::Graphics;
+    ApplyWindowStyle();
+    if(g_hudWindow) {
+        if(g_showFps && !g_panelVisible)ShowWindow(g_hudWindow,SW_SHOWNOACTIVATE);
+        g_frameCount=0;g_fps=0.0;g_lastFpsUpdate=std::chrono::steady_clock::now();
+        InvalidateRect(g_hudWindow,nullptr,TRUE);
+    }
+    if(g_panelWindow)InvalidateRect(g_panelWindow,nullptr,FALSE);
+    PositionPanel();PositionHud();
+}
+void ApplyThemeSelection(int idx) {
+    if(idx<0||idx>=static_cast<int>(Themes.size()))return;
+    g_themeIndex=idx;SaveTheme();ApplyWindowStyle();
+    if(g_panelWindow)InvalidateRect(g_panelWindow,nullptr,FALSE);
+    if(g_hudWindow)InvalidateRect(g_hudWindow,nullptr,FALSE);
+}
+void Activate(int hit) {
+    if(hit>=100&&hit<=103){g_page=hit==100?Page::Graphics:hit==101?Page::Appearance:hit==102?Page::Controls:Page::System;g_dropdown=Dropdown::None;g_hover=-1;}
+    else switch(hit){
+        case 20:ToggleFps();break;
+        case 21:OpenDropdown(Dropdown::Resolution);break;
+        case 22:ToggleVsync();break;
+        case 23:ToggleWide();break;
+        case 24:ToggleFit();break;
+        case 25:ResetSettings();break;
+        case 26:OpenDropdown(Dropdown::Antialiasing);break;
+        case 27:OpenDropdown(Dropdown::FrameRate);break;
+        case 30:OpenDropdown(Dropdown::Theme);break;
+        case 31:OpenDropdown(Dropdown::Font);break;
+        case 50:case 51:case 52:case 53:case 54:ChooseLanguage(hit-50);break;
+        case 60:RestartPort();return;
+        case 61:OpenFolder(SavesDirectory());break;
+        case 62:OpenFolder(ExecutableDirectory());break;
+        case 90:SetVisible(false);return;
+        default:return;
+    }
+    if(g_panelWindow)InvalidateRect(g_panelWindow,nullptr,FALSE);
+}
+int HitTest(POINT p) {
+    if(Contains(CloseRect(),p))return 90;
+    for(int i=0;i<4;++i)if(Contains(NavRect(i),p))return 100+i;
+    if(g_page==Page::Graphics){
+        if(Contains(FpsRect(),p))return 20;
+        if(Contains(ResolutionButtonRect(),p))return 21;
+        if(Contains(VsyncRect(),p))return 22;
+        if(Contains(WideRect(),p))return 23;
+        if(Contains(FitRect(),p))return 24;
+        if(Contains(ResetRect(),p))return 25;
+        
+        if(Contains(FrameLimitRect(),p))return 27;
+    }
+    if(g_page==Page::System)return SystemHit(p);
+    if(g_page==Page::Appearance){if(Contains(ThemeButtonRect(),p))return 30;if(Contains(FontButtonRect(),p))return 31;}
+    if(g_page==Page::Controls){for(int i=0;i<3;++i){RECT r{ContentX,153+i*69,ContentRight,211+i*69};if(Contains(r,p))return 40+i;}}
+    return -1;
+}
+void SelectDropdownItem(int idx) {
+    if(g_dropdown==Dropdown::Theme)ApplyThemeSelection(idx);
+    else if(g_dropdown==Dropdown::Resolution)ChangeResolutionTo(idx);
+    else if(g_dropdown==Dropdown::Font && idx>=0 && idx<int(FontFaces.size())) { g_fontIndex=idx; SaveTheme(); }
+    else if(g_dropdown==Dropdown::Antialiasing)ApplyAntialiasingSelection(idx);
+    else if(g_dropdown==Dropdown::FrameRate)ChangeFrameLimitTo(idx);
+    g_dropdown=Dropdown::None;g_dropdownHover=-1;
+    if(g_panelWindow)InvalidateRect(g_panelWindow,nullptr,FALSE);
+    if(g_hudWindow)InvalidateRect(g_hudWindow,nullptr,TRUE);
+}
+LRESULT CALLBACK PanelProc(HWND w,UINT m,WPARAM wp,LPARAM lp) {
+    switch(m){
+    case WM_ERASEBKGND:return 1;
+    case WM_PAINT:PaintPanel(w);return 0;
+    case WM_MOUSEMOVE:{
+        TRACKMOUSEEVENT track{sizeof(track),TME_LEAVE,w,0};TrackMouseEvent(&track);
+        POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
+        int d=DropdownItemAt(p);
+        if(g_dropdown!=Dropdown::None){if(d!=g_dropdownHover){g_dropdownHover=d;InvalidateRect(w,nullptr,FALSE);}return 0;}
+        int h=HitTest(p);if(h!=g_hover){g_hover=h;InvalidateRect(w,nullptr,FALSE);}return 0;
+    }
+    case WM_MOUSELEAVE:g_hover=-1;g_dropdownHover=-1;InvalidateRect(w,nullptr,FALSE);return 0;
+    case WM_LBUTTONUP:{
+        POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
+        if(g_dropdown!=Dropdown::None){
+            if(Contains(DropdownRect(),p)){int idx=DropdownItemAt(p);if(idx>=0)SelectDropdownItem(idx);return 0;}
+            g_dropdown=Dropdown::None;g_dropdownHover=-1;
+        }
+        Activate(HitTest(p));if(g_panelWindow)InvalidateRect(w,nullptr,FALSE);return 0;
+    }
+    case WM_MOUSEWHEEL:{
+        if(g_dropdown!=Dropdown::None){const int delta=GET_WHEEL_DELTA_WPARAM(wp);SetDropdownScroll(DropdownTopScroll()+(delta>0?-3:3));InvalidateRect(w,nullptr,FALSE);return 0;}return 0;
+    }
+    case WM_KEYDOWN:
+        if(wp==VK_ESCAPE||wp==VK_F1){if(g_dropdown!=Dropdown::None){g_dropdown=Dropdown::None;InvalidateRect(w,nullptr,FALSE);}else SetVisible(false);return 0;}
+        if(g_dropdown!=Dropdown::None&&(wp==VK_UP||wp==VK_DOWN)){SetDropdownScroll(DropdownTopScroll()+(wp==VK_UP?-1:1));InvalidateRect(w,nullptr,FALSE);return 0;}
+        if(wp==VK_TAB){g_page=g_page==Page::Graphics?Page::Appearance:g_page==Page::Appearance?Page::Controls:g_page==Page::Controls?Page::System:Page::Graphics;g_dropdown=Dropdown::None;InvalidateRect(w,nullptr,FALSE);return 0;}
+        return 0;
+    case WM_CLOSE:SetVisible(false);return 0;
+    case WM_DPICHANGED:InvalidateRect(w,nullptr,FALSE);return 0;
+    default:return DefWindowProcW(w,m,wp,lp);
+    }
+}
+LRESULT CALLBACK HudProc(HWND w,UINT m,WPARAM wp,LPARAM lp) {
+    (void)wp;(void)lp;
+    switch(m){
+    case WM_NCHITTEST:return HTTRANSPARENT;
+    case WM_ERASEBKGND:return 1;
+    case WM_PAINT:{
+        PAINTSTRUCT ps{};HDC dc=BeginPaint(w,&ps);if(dc){const Theme&t=CurrentTheme();
+            RECT all{0,0,HudWidth,HudHeight};FillSolid(dc,all,t.panel);DrawPill(dc,RECT{0,0,HudWidth,HudHeight},t.panel,t.accent);
+            HBRUSH dot=CreateSolidBrush(t.accent);if(dot){HGDIOBJ old=SelectObject(dc,dot);HGDIOBJ nullPen=GetStockObject(NULL_PEN);HGDIOBJ op=SelectObject(dc,nullPen);Ellipse(dc,12,17,22,27);SelectObject(dc,op);SelectObject(dc,old);DeleteObject(dot);}
+            std::wstring label=L"FPS  --";
+            if(g_fps>0.0)label=L"FPS  "+std::to_wstring(static_cast<unsigned>(g_fps+0.5));
+            Text(dc,29,1,HudWidth-37,HudHeight-2,label.c_str(),14,t.ink,FW_SEMIBOLD,DT_LEFT|DT_VCENTER|DT_SINGLELINE);
+            EndPaint(w,&ps);
+        }return 0;
+    }
+    case WM_MOUSEACTIVATE:return MA_NOACTIVATE;
+    default:return DefWindowProcW(w,m,wp,lp);
+    }
+}
+bool RegisterWindowClass(const wchar_t* name,WNDPROC proc){
+    WNDCLASSEXW c{};c.cbSize=sizeof(c);c.lpfnWndProc=proc;c.hInstance=GetModuleHandleW(nullptr);
+    c.hCursor=LoadCursorW(nullptr,MAKEINTRESOURCEW(32512));c.hbrBackground=nullptr;c.lpszClassName=name;
+    if(RegisterClassExW(&c)) return true;
+    return GetLastError()==ERROR_CLASS_ALREADY_EXISTS;
+}
+void EnsureWindows(){
+    if(!g_hostWindow||!IsWindow(g_hostWindow))return;
+    HINSTANCE inst=GetModuleHandleW(nullptr);
+    if(!g_panelWindow&&RegisterWindowClass(OverlayClassName,PanelProc)){
+        g_panelWindow=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_LAYERED|WS_EX_TOPMOST,OverlayClassName,L"Monster Hunter Tri - Ajustes",WS_POPUP,CW_USEDEFAULT,CW_USEDEFAULT,PanelWidth,PanelHeight,g_hostWindow,nullptr,inst,nullptr);
+        if(g_panelWindow){ShowWindow(g_panelWindow,SW_HIDE);ApplyWindowStyle();}
+    }
+    if(!g_hudWindow&&RegisterWindowClass(HudClassName,HudProc)){
+        g_hudWindow=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_TOPMOST,HudClassName,L"MH3 FPS",WS_POPUP,CW_USEDEFAULT,CW_USEDEFAULT,HudWidth,HudHeight,g_hostWindow,nullptr,inst,nullptr);
+        if(g_hudWindow){
+            const DWORD roundPreference=2;
+            if(FAILED(DwmSetWindowAttribute(g_hudWindow,33,&roundPreference,sizeof(roundPreference)))
+               && !SetWindowRgn(g_hudWindow,CreateRoundRectRgn(0,0,HudWidth+1,HudHeight+1,28,28),TRUE)) {
+                // Keep a valid rectangular HUD if this Windows version cannot round popup windows.
+            }
+            ShowWindow(g_hudWindow,SW_HIDE);
+        }
+    }
+}
+void DispatchWindowMessages(HWND w){if(!w)return;MSG m{};while(PeekMessageW(&m,w,0,0,PM_REMOVE)){TranslateMessage(&m);DispatchMessageW(&m);}}
+} // namespace
+
+void AttachWindow(SDL_Window* window) noexcept {
+    g_sdlWindow=window;g_hostWindow=nullptr;
+    if(window){SDL_PropertiesID p=SDL_GetWindowProperties(window);g_hostWindow=static_cast<HWND>(SDL_GetPointerProperty(p,SDL_PROP_WINDOW_WIN32_HWND_POINTER,nullptr));}
+}
+void InitializeRuntimeSettings() noexcept {
+    g_showFps=RuntimeConfigFile::ShowFps(true);LoadTheme();LoadGraphicsSettings();LoadResolutions();EnsureWindows();
+    g_frameCount=0;g_fps=0.0;g_lastFpsUpdate=std::chrono::steady_clock::now();g_lastPresentedSignal=g_lastFpsUpdate;
+    if(g_hudWindow){if(g_showFps){ShowWindow(g_hudWindow,SW_SHOWNOACTIVATE);PositionHud();SetWindowPos(g_hudWindow,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_SHOWWINDOW);InvalidateRect(g_hudWindow,nullptr,TRUE);}else ShowWindow(g_hudWindow,SW_HIDE);}
+}
+void HandleEvents(const AuroraEvent* events) noexcept {
+    if(!events)return;
+    for(const AuroraEvent*e=events;e->type!=AURORA_NONE;++e){
+        if(e->type!=AURORA_SDL_EVENT||e->sdl.type!=SDL_EVENT_KEY_DOWN||e->sdl.key.repeat)continue;
+        const SDL_Keycode k=e->sdl.key.key;
+        if(k==SDLK_ESCAPE||k==SDLK_F1){EnsureWindows();ToggleVisible();}
+    }
+}
+void Pump() noexcept {
+    EnsureWindows();DispatchWindowMessages(g_panelWindow);DispatchWindowMessages(g_hudWindow);
+    if(g_showFps&&g_hudWindow){
+        if(g_panelVisible){if(IsWindowVisible(g_hudWindow))ShowWindow(g_hudWindow,SW_HIDE);}
+        else{if(!IsWindowVisible(g_hudWindow))ShowWindow(g_hudWindow,SW_SHOWNOACTIVATE);PositionHud();}
+        // Fallback: some renderer paths do not emit the frame-seal callback every present.
+        const auto now=std::chrono::steady_clock::now();
+        const uint64_t mh3LogicalNow = MH3FrameRateControl::LogicalFrameCount();
+        {
+            // FPS real: fotogramas logicos del juego por segundo (los cuenta el frame pacer).
+            static uint64_t mh3LastCount = mh3LogicalNow;
+            static auto mh3LastStamp = now;
+            const double mh3Elapsed = std::chrono::duration<double>(now - mh3LastStamp).count();
+            if (mh3Elapsed >= 0.5) {
+                g_fps = double(mh3LogicalNow - mh3LastCount) / mh3Elapsed;
+                mh3LastCount = mh3LogicalNow; mh3LastStamp = now;
+                if (!g_panelVisible) { PositionHud(); InvalidateRect(g_hudWindow, nullptr, TRUE); UpdateWindow(g_hudWindow); }
+                else if (g_panelWindow) InvalidateRect(g_panelWindow, nullptr, TRUE);
+            }
+        }
+        if(false){
+            ++g_frameCount;
+            const double elapsed=std::chrono::duration<double>(now-g_lastFpsUpdate).count();
+            if(elapsed>=0.5){g_fps=double(g_frameCount)/elapsed;g_frameCount=0;g_lastFpsUpdate=now;if(!g_panelVisible){PositionHud();InvalidateRect(g_hudWindow,nullptr,TRUE);UpdateWindow(g_hudWindow);}else if(g_panelWindow)InvalidateRect(g_panelWindow,nullptr,TRUE);}
+        }
+    }else if(g_hudWindow&&IsWindowVisible(g_hudWindow))ShowWindow(g_hudWindow,SW_HIDE);
+    if(g_panelVisible)PositionPanel();
+}
+bool IsOpen() noexcept{return g_panelVisible;}
+void Draw() noexcept{if(g_panelWindow&&g_panelVisible)InvalidateRect(g_panelWindow,nullptr,FALSE);}
+bool StartupScreenVisible() noexcept{return false;}
+void NotifyStrapInputAccepted() noexcept{}
+void AdvancePresentedFrame() noexcept {
+    EnsureWindows();
+    return; // el contador usa los fotogramas logicos del frame pacer
+    const auto now=std::chrono::steady_clock::now();
+    g_lastPresentedSignal=now;
+    ++g_frameCount;
+    const double elapsed=std::chrono::duration<double>(now-g_lastFpsUpdate).count();
+    if(elapsed>=0.5){
+        g_fps=double(g_frameCount)/elapsed;g_frameCount=0;g_lastFpsUpdate=now;
+        if(!g_panelVisible){
+            if(!IsWindowVisible(g_hudWindow))ShowWindow(g_hudWindow,SW_SHOWNOACTIVATE);
+            PositionHud();SetWindowPos(g_hudWindow,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_SHOWWINDOW);
+            InvalidateRect(g_hudWindow,nullptr,TRUE);RedrawWindow(g_hudWindow,nullptr,nullptr,RDW_INVALIDATE|RDW_UPDATENOW|RDW_NOERASE);
+        }
+        if(g_panelVisible&&g_panelWindow)InvalidateRect(g_panelWindow,nullptr,TRUE);
+    }
+}
+void ReleaseControllers() noexcept {
+    if(g_panelWindow)ShowWindow(g_panelWindow,SW_HIDE);
+    if(g_hudWindow)ShowWindow(g_hudWindow,SW_HIDE);
+    g_panelVisible=false;g_dropdown=Dropdown::None;
+}
+} // namespace settings_overlay
+#endif

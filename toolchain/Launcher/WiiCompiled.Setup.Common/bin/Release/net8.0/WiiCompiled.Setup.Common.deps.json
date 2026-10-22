@@ -1,0 +1,23 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v8.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v8.0": {
+      "WiiCompiled.Setup.Common/0.2.32": {
+        "runtime": {
+          "WiiCompiled.Setup.Common.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "WiiCompiled.Setup.Common/0.2.32": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}

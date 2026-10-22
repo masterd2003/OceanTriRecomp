@@ -1,0 +1,618 @@
+#include "settings_overlay.h"
+
+#include "runtime_config.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <windowsx.h>
+#include <dwmapi.h>
+#include <SDL3/SDL_events.h>
+#include <SDL3/SDL_properties.h>
+#include <SDL3/SDL_video.h>
+
+namespace settings_overlay {
+namespace {
+constexpr wchar_t OverlayClassName[] = L"MH3RecompSettingsOverlay";
+constexpr wchar_t HudClassName[] = L"MH3RecompFpsHud";
+constexpr int PanelWidth = 560;
+constexpr int PanelHeight = 404;
+constexpr int HudWidth = 142;
+constexpr int HudHeight = 36;
+
+constexpr COLORREF Ink = RGB(235, 250, 248);
+constexpr COLORREF Muted = RGB(145, 181, 177);
+constexpr COLORREF Accent = RGB(70, 245, 218);
+constexpr COLORREF Accent2 = RGB(40, 211, 195);
+constexpr COLORREF Card = RGB(8, 14, 16);
+constexpr COLORREF CardHover = RGB(13, 34, 35);
+constexpr COLORREF Border = RGB(53, 226, 207);
+
+struct Resolution {
+    uint32_t width;
+    uint32_t height;
+};
+
+enum class Page : uint8_t { Home, Settings };
+
+SDL_Window* g_sdlWindow = nullptr;
+HWND g_hostWindow = nullptr;
+HWND g_panelWindow = nullptr;
+HWND g_hudWindow = nullptr;
+bool g_panelVisible = false;
+Page g_page = Page::Home;
+int g_hover = -1;
+bool g_showFps = true;
+std::vector<Resolution> g_resolutions;
+size_t g_resolutionIndex = 0;
+uint64_t g_frameCount = 0;
+double g_fps = 0.0;
+std::chrono::steady_clock::time_point g_lastFpsUpdate = std::chrono::steady_clock::now();
+
+bool SameResolution(const Resolution& a, const Resolution& b) {
+    return a.width == b.width && a.height == b.height;
+}
+
+void AddResolution(uint32_t width, uint32_t height) {
+    if (width < 640 || height < 480 || width > 7680 || height > 4320)
+        return;
+
+    const Resolution candidate{width, height};
+    if (std::none_of(g_resolutions.begin(), g_resolutions.end(), [&](const Resolution& item) { return SameResolution(item, candidate); }))
+        g_resolutions.push_back(candidate);
+}
+
+void LoadResolutions() {
+    g_resolutions.clear();
+
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+    for (DWORD i = 0; EnumDisplaySettingsW(nullptr, i, &mode); ++i) {
+        if (mode.dmPelsWidth >= 640 && mode.dmPelsHeight >= 480)
+            AddResolution(mode.dmPelsWidth, mode.dmPelsHeight);
+        mode = {};
+        mode.dmSize = sizeof(mode);
+    }
+
+    // Ensure a compact, conventional list is available on drivers that do not
+    // report every window size as a display mode. These are real pixel sizes.
+    AddResolution(960, 544);
+    AddResolution(1280, 720);
+    AddResolution(1366, 768);
+    AddResolution(1600, 900);
+    AddResolution(1920, 1080);
+    AddResolution(2560, 1440);
+    AddResolution(3840, 2160);
+
+    std::sort(g_resolutions.begin(), g_resolutions.end(), [](const Resolution& a, const Resolution& b) {
+        if (a.width != b.width)
+            return a.width < b.width;
+        return a.height < b.height;
+    });
+
+    const Resolution current{RuntimeConfigFile::WindowWidth(960), RuntimeConfigFile::WindowHeight(544)};
+    AddResolution(current.width, current.height);
+    std::sort(g_resolutions.begin(), g_resolutions.end(), [](const Resolution& a, const Resolution& b) {
+        return a.width != b.width ? a.width < b.width : a.height < b.height;
+    });
+
+    const auto found = std::find_if(g_resolutions.begin(), g_resolutions.end(), [&](const Resolution& item) { return SameResolution(item, current); });
+    g_resolutionIndex = found == g_resolutions.end() ? 0 : size_t(found - g_resolutions.begin());
+}
+
+void DrawTextLine(HDC dc, int x, int y, int width, int height, const wchar_t* text, int size, COLORREF color, int weight = FW_NORMAL, UINT format = DT_LEFT | DT_VCENTER | DT_SINGLELINE) {
+    HFONT font = CreateFontW(-size, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    if (!font)
+        return;
+    HGDIOBJ oldFont = SelectObject(dc, font);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, color);
+    RECT rect{x, y, x + width, y + height};
+    DrawTextW(dc, text, -1, &rect, format);
+    SelectObject(dc, oldFont);
+    DeleteObject(font);
+}
+
+void RoundedCard(HDC dc, const RECT& rect, COLORREF fill, COLORREF edge, int radius = 20) {
+    HBRUSH brush = CreateSolidBrush(fill);
+    HPEN pen = CreatePen(PS_SOLID, 1, edge);
+    if (!brush || !pen) {
+        if (brush) DeleteObject(brush);
+        if (pen) DeleteObject(pen);
+        return;
+    }
+    HGDIOBJ oldBrush = SelectObject(dc, brush);
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, radius, radius);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(brush);
+    DeleteObject(pen);
+}
+
+void AccentPill(HDC dc, int x, int y, int w, int h, COLORREF color) {
+    RoundedCard(dc, RECT{x, y, x + w, y + h}, color, color, h);
+}
+
+bool g_panelHasGlass = false;
+bool g_hudHasGlass = false;
+
+// SetWindowCompositionAttribute enables the real Windows acrylic blur behind
+// the custom-drawn client area. DWM's system backdrop is used as a fallback.
+bool ApplyGlass(HWND window) {
+    if (!window)
+        return false;
+
+    struct AccentPolicy { int state; int flags; DWORD gradientColor; int animationId; };
+    enum { ACCENT_ENABLE_ACRYLICBLURBEHIND = 4, WCA_ACCENT_POLICY = 19 };
+    struct WindowCompositionAttributeData { int attribute; void* data; size_t size; };
+    using SetWindowCompositionAttributeFn = BOOL(WINAPI*)(HWND, WindowCompositionAttributeData*);
+
+    bool glass = false;
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    auto setComposition = user32 ? reinterpret_cast<SetWindowCompositionAttributeFn>(GetProcAddress(user32, "SetWindowCompositionAttribute")) : nullptr;
+    if (setComposition) {
+        AccentPolicy policy{};
+        policy.state = ACCENT_ENABLE_ACRYLICBLURBEHIND;
+        policy.flags = 2;
+        policy.gradientColor = 0xD9080D0F; // near-black translucent tint over the blurred desktop/game
+        WindowCompositionAttributeData data{WCA_ACCENT_POLICY, &policy, sizeof(policy)};
+        glass = setComposition(window, &data) != FALSE;
+    }
+
+    const BOOL darkMode = TRUE;
+    const int backdrop = 3; // DWMSBT_TRANSIENTWINDOW, Windows 11 fallback
+    const int corners = 2;  // DWMWCP_ROUND
+    const COLORREF border = RGB(53, 226, 207);
+    DwmSetWindowAttribute(window, static_cast<DWMWINDOWATTRIBUTE>(20), &darkMode, sizeof(darkMode));
+    DwmSetWindowAttribute(window, static_cast<DWMWINDOWATTRIBUTE>(33), &corners, sizeof(corners));
+    DwmSetWindowAttribute(window, static_cast<DWMWINDOWATTRIBUTE>(34), &border, sizeof(border));
+
+    if (!glass) {
+        // Windows 11's transient system backdrop is a real blurred DWM surface.
+        glass = SUCCEEDED(DwmSetWindowAttribute(window, static_cast<DWMWINDOWATTRIBUTE>(38), &backdrop, sizeof(backdrop)));
+        MARGINS margins{-1, -1, -1, -1};
+        DwmExtendFrameIntoClientArea(window, &margins);
+        DWM_BLURBEHIND blur{};
+        blur.dwFlags = DWM_BB_ENABLE;
+        blur.fEnable = TRUE;
+        DwmEnableBlurBehindWindow(window, &blur);
+    }
+    return glass;
+}
+
+RECT HomeSettingsRect() { return RECT{28, 120, PanelWidth - 28, 198}; }
+RECT HomeExitRect() { return RECT{28, 210, PanelWidth - 28, 288}; }
+RECT SettingsFpsRect() { return RECT{28, 112, PanelWidth - 28, 174}; }
+RECT SettingsResolutionRect() { return RECT{28, 186, PanelWidth - 28, 282}; }
+RECT SettingsBackRect() { return RECT{170, 320, 390, 368}; }
+RECT CloseRect() { return RECT{PanelWidth - 48, 17, PanelWidth - 20, 45}; }
+
+bool Contains(RECT rect, POINT point) { return PtInRect(&rect, point) != FALSE; }
+
+int HitTest(POINT p) {
+    if (g_page == Page::Home) {
+        if (Contains(HomeSettingsRect(), p)) return 0;
+        if (Contains(HomeExitRect(), p)) return 1;
+    } else {
+        if (Contains(SettingsFpsRect(), p)) return 2;
+        if (Contains(SettingsResolutionRect(), p)) {
+            if (p.x >= 355 && p.x < 405) return 3;
+            if (p.x >= 456 && p.x < 506) return 4;
+        }
+        if (Contains(SettingsBackRect(), p)) return 5;
+    }
+    if (Contains(CloseRect(), p)) return 6;
+    return -1;
+}
+
+void DrawHome(HDC dc) {
+    DrawTextLine(dc, 30, 22, 430, 28, L"MONSTER HUNTER TRI", 14, Accent, FW_SEMIBOLD);
+    DrawTextLine(dc, 30, 49, 450, 40, L"Menú del juego", 27, Ink, FW_SEMIBOLD);
+    DrawTextLine(dc, 32, 84, 460, 24, L"Elige una opción. Esc o F1 para volver al juego.", 12, Muted);
+
+    const RECT settings = HomeSettingsRect();
+    RoundedCard(dc, settings, g_hover == 0 ? CardHover : Card, Border, 20);
+    AccentPill(dc, 44, 141, 4, 34, Accent);
+    DrawTextLine(dc, 62, 132, 350, 26, L"Ajustes", 19, Ink, FW_SEMIBOLD);
+    DrawTextLine(dc, 62, 159, 390, 20, L"FPS en pantalla y resolución de ventana", 12, Muted);
+    DrawTextLine(dc, 464, 141, 36, 32, L"›", 25, Accent, FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    const RECT exit = HomeExitRect();
+    RoundedCard(dc, exit, g_hover == 1 ? RGB(18, 42, 41) : RGB(10, 18, 19), Border, 20);
+    AccentPill(dc, 44, 231, 4, 34, Accent2);
+    DrawTextLine(dc, 62, 222, 350, 26, L"Salir del juego", 19, Ink, FW_SEMIBOLD);
+    DrawTextLine(dc, 62, 249, 390, 20, L"Cerrar Monster Hunter Tri Recomp", 12, Muted);
+    DrawTextLine(dc, 464, 231, 36, 32, L"×", 25, Accent2, FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    DrawTextLine(dc, 35, 335, 490, 28, L"Esc o F1 cierra este panel y te devuelve al juego.", 11, Muted, FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+void DrawSettings(HDC dc) {
+    DrawTextLine(dc, 30, 22, 430, 28, L"MONSTER HUNTER TRI  /  AJUSTES", 14, Accent, FW_SEMIBOLD);
+    DrawTextLine(dc, 30, 49, 450, 40, L"Pantalla", 27, Ink, FW_SEMIBOLD);
+    DrawTextLine(dc, 32, 84, 460, 24, L"Los cambios se guardan en UserData/Config.toml.", 12, Muted);
+
+    const RECT fpsRect = SettingsFpsRect();
+    RoundedCard(dc, fpsRect, g_hover == 2 ? CardHover : Card, Border, 18);
+    DrawTextLine(dc, 48, 123, 310, 24, L"Mostrar FPS", 17, Ink, FW_SEMIBOLD);
+    DrawTextLine(dc, 48, 148, 310, 18, L"Contador en la esquina superior derecha", 11, Muted);
+    RoundedCard(dc, RECT{430, 126, 498, 158}, g_showFps ? RGB(20, 82, 73) : RGB(18, 23, 24), g_showFps ? Accent : Border, 16);
+    AccentPill(dc, g_showFps ? 466 : 435, 131, 26, 22, g_showFps ? Accent : Muted);
+
+    const RECT resRect = SettingsResolutionRect();
+    RoundedCard(dc, resRect, g_hover == 3 || g_hover == 4 ? CardHover : Card, Border, 18);
+    DrawTextLine(dc, 48, 198, 350, 24, L"Resolución de ventana", 17, Ink, FW_SEMIBOLD);
+    DrawTextLine(dc, 48, 223, 285, 20, L"Tamaño real en píxeles", 11, Muted);
+
+    const Resolution res = g_resolutions.empty() ? Resolution{960, 544} : g_resolutions[std::min(g_resolutionIndex, g_resolutions.size() - 1)];
+    const std::wstring resolution = std::to_wstring(res.width) + L" × " + std::to_wstring(res.height);
+    DrawTextLine(dc, 170, 244, 180, 30, resolution.c_str(), 17, Accent, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    RoundedCard(dc, RECT{355, 238, 405, 274}, g_hover == 3 ? CardHover : RGB(10, 19, 20), Border, 14);
+    RoundedCard(dc, RECT{456, 238, 506, 274}, g_hover == 4 ? CardHover : RGB(10, 19, 20), Border, 14);
+    DrawTextLine(dc, 355, 238, 50, 36, L"‹", 22, Ink, FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    DrawTextLine(dc, 456, 238, 50, 36, L"›", 22, Ink, FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    RoundedCard(dc, SettingsBackRect(), g_hover == 5 ? CardHover : RGB(9, 17, 18), Border, 18);
+    DrawTextLine(dc, 170, 320, 220, 48, L"Volver", 15, Ink, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+void PaintPanel(HWND window) {
+    PAINTSTRUCT paint{};
+    HDC dc = BeginPaint(window, &paint);
+    if (dc) {
+        SetBkMode(dc, TRANSPARENT);
+        if (!g_panelHasGlass) {
+            RECT client{};
+            GetClientRect(window, &client);
+            HBRUSH backdrop = CreateSolidBrush(RGB(5, 9, 10));
+            if (backdrop) { FillRect(dc, &client, backdrop); DeleteObject(backdrop); }
+        }
+        if (g_page == Page::Home)
+            DrawHome(dc);
+        else
+            DrawSettings(dc);
+        EndPaint(window, &paint);
+    }
+}
+
+void PositionPanel() {
+    if (!g_hostWindow || !g_panelWindow || !g_panelVisible)
+        return;
+
+    RECT client{};
+    if (!GetClientRect(g_hostWindow, &client))
+        return;
+    POINT origin{client.left, client.top};
+    ClientToScreen(g_hostWindow, &origin);
+    const int availableWidth = client.right - client.left;
+    const int availableHeight = client.bottom - client.top;
+    const int x = origin.x + std::max(0, (availableWidth - PanelWidth) / 2);
+    const int y = origin.y + std::max(0, (availableHeight - PanelHeight) / 2);
+    SetWindowPos(g_panelWindow, HWND_TOP, x, y, PanelWidth, PanelHeight, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+void PositionHud() {
+    if (!g_hostWindow || !g_hudWindow || !g_showFps)
+        return;
+    RECT client{};
+    if (!GetClientRect(g_hostWindow, &client))
+        return;
+    POINT topLeft{client.left, client.top};
+    POINT bottomRight{client.right, client.bottom};
+    ClientToScreen(g_hostWindow, &topLeft);
+    ClientToScreen(g_hostWindow, &bottomRight);
+    // Anchor against the actual right edge of the game's client rectangle.
+    const int x = std::max(topLeft.x + 8, bottomRight.x - HudWidth - 16);
+    const int y = topLeft.y + 16;
+    SetWindowPos(g_hudWindow, HWND_TOP, x, y, HudWidth, HudHeight, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+void SetVisible(bool visible) {
+    g_panelVisible = visible;
+    if (!g_panelWindow)
+        return;
+    if (visible) {
+        g_page = Page::Home;
+        g_hover = -1;
+        PositionPanel();
+        ShowWindow(g_panelWindow, SW_SHOW);
+        SetForegroundWindow(g_panelWindow);
+        SetFocus(g_panelWindow);
+        InvalidateRect(g_panelWindow, nullptr, FALSE);
+    } else {
+        ShowWindow(g_panelWindow, SW_HIDE);
+        if (g_hostWindow && IsWindow(g_hostWindow))
+            SetForegroundWindow(g_hostWindow);
+    }
+}
+
+void ToggleVisible() { SetVisible(!g_panelVisible); }
+
+void ChangeResolution(int direction) {
+    if (g_resolutions.empty())
+        LoadResolutions();
+    if (g_resolutions.empty())
+        return;
+    const auto count = static_cast<int>(g_resolutions.size());
+    int next = static_cast<int>(g_resolutionIndex) + direction;
+    if (next < 0) next = count - 1;
+    if (next >= count) next = 0;
+    g_resolutionIndex = static_cast<size_t>(next);
+    const auto selected = g_resolutions[g_resolutionIndex];
+    RuntimeConfigFile::SetWindowSize(selected.width, selected.height);
+    if (g_sdlWindow)
+        SDL_SetWindowSize(g_sdlWindow, static_cast<int>(selected.width), static_cast<int>(selected.height));
+    PositionPanel();
+    PositionHud();
+    if (g_panelWindow) InvalidateRect(g_panelWindow, nullptr, FALSE);
+}
+
+void ToggleFps() {
+    g_showFps = !g_showFps;
+    RuntimeConfigFile::SetShowFps(g_showFps);
+    if (g_hudWindow) {
+        if (g_showFps) {
+            PositionHud();
+        } else {
+            ShowWindow(g_hudWindow, SW_HIDE);
+        }
+    }
+    if (g_panelWindow) InvalidateRect(g_panelWindow, nullptr, FALSE);
+}
+
+void ActivateHit(int hit) {
+    switch (hit) {
+    case 0:
+        g_page = Page::Settings;
+        LoadResolutions();
+        break;
+    case 1:
+        // Push a normal SDL quit event so the host runtime can shut down cleanly.
+        {
+            SDL_Event quit{};
+            quit.type = SDL_EVENT_QUIT;
+            SDL_PushEvent(&quit);
+        }
+        break;
+    case 2:
+        ToggleFps();
+        return;
+    case 3:
+        ChangeResolution(-1);
+        return;
+    case 4:
+        ChangeResolution(1);
+        return;
+    case 5:
+        g_page = Page::Home;
+        break;
+    case 6:
+        SetVisible(false);
+        return;
+    default:
+        return;
+    }
+    if (g_panelWindow) InvalidateRect(g_panelWindow, nullptr, FALSE);
+}
+
+LRESULT CALLBACK PanelProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    switch (message) {
+    case WM_ERASEBKGND:
+        return 1; // Leave the DWM backdrop visible through the glass margins.
+    case WM_PAINT:
+        PaintPanel(window);
+        return 0;
+    case WM_MOUSEMOVE: {
+        const POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        const int hit = HitTest(point);
+        if (hit != g_hover) {
+            g_hover = hit;
+            InvalidateRect(window, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_LBUTTONUP: {
+        const POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        ActivateHit(HitTest(point));
+        return 0;
+    }
+    case WM_KEYDOWN:
+        if (wparam == VK_ESCAPE || wparam == VK_F1) {
+            SetVisible(false);
+            return 0;
+        }
+        if (g_page == Page::Settings && (wparam == VK_LEFT || wparam == VK_RIGHT)) {
+            ChangeResolution(wparam == VK_LEFT ? -1 : 1);
+            return 0;
+        }
+        if (g_page == Page::Settings && (wparam == VK_SPACE || wparam == VK_RETURN)) {
+            ToggleFps();
+            return 0;
+        }
+        return 0;
+    case WM_CLOSE:
+        SetVisible(false);
+        return 0;
+    case WM_DESTROY:
+        if (window == g_panelWindow) g_panelWindow = nullptr;
+        return 0;
+    default:
+        return DefWindowProcW(window, message, wparam, lparam);
+    }
+}
+
+LRESULT CALLBACK HudProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    (void)wparam;
+    (void)lparam;
+    switch (message) {
+    case WM_NCHITTEST:
+        return HTTRANSPARENT;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT paint{};
+        HDC dc = BeginPaint(window, &paint);
+        if (dc) {
+            if (!g_hudHasGlass) {
+                RECT client{};
+                GetClientRect(window, &client);
+                HBRUSH backdrop = CreateSolidBrush(RGB(5, 10, 11));
+                if (backdrop) { FillRect(dc, &client, backdrop); DeleteObject(backdrop); }
+            }
+            RoundedCard(dc, RECT{0, 0, HudWidth, HudHeight}, RGB(5, 10, 11), Accent, 18);
+            DrawTextLine(dc, 8, 0, HudWidth - 16, HudHeight, (L"FPS  " + std::to_wstring(static_cast<unsigned>(g_fps + 0.5))).c_str(), 13, Ink,
+                         FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            EndPaint(window, &paint);
+        }
+        return 0;
+    }
+    case WM_MOUSEACTIVATE:
+        return MA_NOACTIVATE;
+    default:
+        return DefWindowProcW(window, message, wparam, lparam);
+    }
+}
+
+bool RegisterWindowClass(const wchar_t* name, WNDPROC procedure) {
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = procedure;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.lpszClassName = name;
+    if (RegisterClassExW(&wc))
+        return true;
+    return GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+}
+
+void EnsureWindows() {
+    if (!g_hostWindow || !IsWindow(g_hostWindow))
+        return;
+
+    const HINSTANCE instance = GetModuleHandleW(nullptr);
+    if (!g_panelWindow && RegisterWindowClass(OverlayClassName, PanelProc)) {
+        g_panelWindow = CreateWindowExW(WS_EX_TOOLWINDOW, OverlayClassName, L"Monster Hunter Tri · Ajustes", WS_POPUP,
+                                        CW_USEDEFAULT, CW_USEDEFAULT, PanelWidth, PanelHeight, g_hostWindow, nullptr, instance, nullptr);
+        if (g_panelWindow) {
+            g_panelHasGlass = ApplyGlass(g_panelWindow);
+            ShowWindow(g_panelWindow, SW_HIDE);
+        }
+    }
+    if (!g_hudWindow && RegisterWindowClass(HudClassName, HudProc)) {
+        g_hudWindow = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT, HudClassName, L"MH3 FPS",
+                                      WS_POPUP, CW_USEDEFAULT, CW_USEDEFAULT, HudWidth, HudHeight, g_hostWindow, nullptr, instance, nullptr);
+        if (g_hudWindow) {
+            SetLayeredWindowAttributes(g_hudWindow, 0, 238, LWA_ALPHA);
+            g_hudHasGlass = ApplyGlass(g_hudWindow);
+            ShowWindow(g_hudWindow, SW_HIDE);
+        }
+    }
+}
+
+void DispatchWindowMessages(HWND window) {
+    if (!window)
+        return;
+    MSG msg{};
+    while (PeekMessageW(&msg, window, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+}
+
+} // namespace
+
+void AttachWindow(SDL_Window* window) noexcept {
+    g_sdlWindow = window;
+    g_hostWindow = nullptr;
+    if (window) {
+        const SDL_PropertiesID properties = SDL_GetWindowProperties(window);
+        g_hostWindow = static_cast<HWND>(SDL_GetPointerProperty(properties, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
+    }
+}
+
+void InitializeRuntimeSettings() noexcept {
+    g_showFps = RuntimeConfigFile::ShowFps(true);
+    LoadResolutions();
+    EnsureWindows();
+    PositionHud();
+    if (g_hudWindow && g_showFps) {
+        ShowWindow(g_hudWindow, SW_SHOWNOACTIVATE);
+        InvalidateRect(g_hudWindow, nullptr, TRUE);
+    }
+}
+
+void HandleEvents(const AuroraEvent* events) noexcept {
+    if (!events)
+        return;
+    for (const AuroraEvent* event = events; event->type != AURORA_NONE; ++event) {
+        if (event->type != AURORA_SDL_EVENT || event->sdl.type != SDL_EVENT_KEY_DOWN || event->sdl.key.repeat)
+            continue;
+        const SDL_Keycode key = event->sdl.key.key;
+        if (key == SDLK_ESCAPE || key == SDLK_F1) {
+            EnsureWindows();
+            ToggleVisible();
+        }
+    }
+}
+
+void Pump() noexcept {
+    EnsureWindows();
+    DispatchWindowMessages(g_panelWindow);
+    DispatchWindowMessages(g_hudWindow);
+    PositionHud();
+    if (g_panelVisible)
+        PositionPanel();
+}
+
+bool IsOpen() noexcept { return g_panelVisible; }
+void Draw() noexcept { if (g_panelWindow && g_panelVisible) InvalidateRect(g_panelWindow, nullptr, FALSE); }
+bool StartupScreenVisible() noexcept { return false; }
+void NotifyStrapInputAccepted() noexcept {}
+
+void AdvancePresentedFrame() noexcept {
+    if (g_showFps && g_hudWindow) {
+        ++g_frameCount;
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed = std::chrono::duration<double>(now - g_lastFpsUpdate).count();
+        if (elapsed >= 0.5) {
+            g_fps = static_cast<double>(g_frameCount) / elapsed;
+            g_frameCount = 0;
+            g_lastFpsUpdate = now;
+            PositionHud();
+            InvalidateRect(g_hudWindow, nullptr, FALSE);
+        }
+    }
+}
+
+void ReleaseControllers() noexcept {
+    if (g_panelWindow) ShowWindow(g_panelWindow, SW_HIDE);
+    if (g_hudWindow) ShowWindow(g_hudWindow, SW_HIDE);
+    g_panelVisible = false;
+}
+
+} // namespace settings_overlay
+
+#else
+namespace settings_overlay {
+void AttachWindow(SDL_Window*) noexcept {}
+void InitializeRuntimeSettings() noexcept {}
+void HandleEvents(const AuroraEvent*) noexcept {}
+void Pump() noexcept {}
+bool IsOpen() noexcept { return false; }
+void Draw() noexcept {}
+bool StartupScreenVisible() noexcept { return false; }
+void NotifyStrapInputAccepted() noexcept {}
+void AdvancePresentedFrame() noexcept {}
+void ReleaseControllers() noexcept {}
+} // namespace settings_overlay
+#endif

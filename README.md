@@ -1,33 +1,64 @@
 # OceanTriRecomp
 
+A native PC port of **Monster Hunter Tri** made by statically recompiling the game's PowerPC code. It runs as native x86-64 code with a modern renderer built on SDL3 and ANGLE, not as an emulator.
+
+> **Source status:** This version is not up to date with the latest OceanTriRecomp source. The upstream OceanTriRecomp repository does not currently publish its most recent source code, so this tree can lag behind the newest fixes and features. Use the latest available release when you only want to play.
+
+> **PAL only:** This build targets the European release, game ID **RMHP08**. It does **not** support NTSC-U or NTSC-J disc images. You must provide your own legally obtained PAL copy of the game (ISO, RVZ or WIA). No game data is included.
+
+## Features
+
+- Static recompilation of the PAL game code for native Windows x86-64.
+- SDL3 windowing with ANGLE rendering over **Vulkan** or **OpenGL ES**.
+- Selectable internal resolution: 540p, 720p, 900p, 1080p, 1440p and 2160p.
+- FPS limit of 30, 45, 60, 90 or 120, with optional V-Sync and an on-screen FPS counter.
+- 16:9 aspect-ratio enforcement and borderless fullscreen.
+- In-game settings menu with Graphics, Appearance, System, Controls and Save Manager pages.
+- 11 UI themes and 5 selectable fonts.
+- Game language selection: Spanish, English, French, German and Italian.
+- Interface language selection: Spanish and English.
+- Keyboard/mouse and controller input, including adjustable mouse-look sensitivity.
+- Save manager with backup, import and export support.
+- Portable configuration stored next to `MH3.exe` in `MH3UI.graphics`, `MH3UI.theme.v3`, `MH3UI.language` and `MH3UI.uilanguage`.
+
+## Requirements
+
+- Windows 10 or Windows 11, 64-bit.
+- A GPU and driver supporting Vulkan or OpenGL ES 3.0 through ANGLE.
+- A PAL Monster Hunter Tri disc image: ISO, RVZ or WIA.
+- A writable folder for the game. Avoid `Program Files`, because settings and saves are stored beside the executable.
+
+## Installation
+
+1. Download the latest Windows build from the **[Releases](https://github.com/masterd2003/OceanTriRecomp/releases)** page.
+2. Extract the archive into a writable folder, for example `D:\Games\OceanTriRecomp`.
+3. Keep all included DLLs next to `MH3.exe`.
+4. Run `MH3.exe`.
+5. On first launch, select your **PAL** Monster Hunter Tri disc image. The launcher copies the image beside `MH3.exe` and prepares the game data. The first preparation can take a while and needs some free disk space.
+6. After preparation, the game starts automatically.
+
+Settings are saved beside the executable. Game saves are stored in the `Saves` folder beside the executable. Back up that folder before updating the port.
+
+You can also pass an image directly:
+
+```powershell
+.\MH3.exe --rom "D:\Games\mh3-pal.iso"
+```
+
+## Building from source
 
 
-Este proyecto lleva Monster Hunter Tri a PC mediante una recompilación del código del juego, con un renderizador moderno sobre SDL3 y ANGLE (Vulkan / OpenGL ES). Incluye un menú de ajustes propio dentro del juego para controlar gráficos, apariencia, controles y partidas guardadas.
+A Windows source build needs Clang, CMake, Ninja, Visual Studio Build Tools with the Windows SDK, and ANGLE. The translation step currently requires Linux or WSL because it uses `fcntl`.
 
-Novedades de la Alpha 1.4
-Correcciones
-Fallo de arranque gráfico en algunos PC (error "OpenGL ES 3.0 is required"): el juego ahora fuerza por sí mismo la creación del contexto OpenGL ES por EGL (ANGLE), por lo que ya no hace falta configurar variables de entorno. Probado en un equipo que antes fallaba y en uno que ya funcionaba.
-La resolución interna ahora se conserva al reiniciar: si eliges 1080p (u otra) en el menú, el juego arranca con esa misma escala en lugar de volver a la resolución base.
-Diagnóstico ampliado: si vuelve a ocurrir un fallo de OpenGL ES, el log incluye una línea GL diagnostics: con el driver de vídeo de SDL y el estado de los hints. Adjúntala al reportar el problema.
-Nuevo
-Interruptor de Pantalla completa en Ajustes → Gráficos. Usa modo sin bordes (borderless), no modifica el tamaño de la ventana ni la resolución interna, y su estado se guarda y se aplica en el siguiente arranque.
-"Restaurar ajustes predeterminados" también desactiva la pantalla completa.
-El panel de Gráficos es algo más alto para alojar la nueva opción.
-Características
-Resolución interna seleccionable: 540p, 720p, 900p, 1080p, 1440p y 2160p.
-Límite de FPS: 30 / 45 / 60 / 90 / 120.
-V-Sync, contador de FPS y relación de aspecto 16:9.
-Renderizador a elegir: Vulkan (ANGLE) u OpenGL ES (se aplica al reiniciar).
-Menú en el juego con páginas de Gráficos, Apariencia (temas y tipografías), Controles (incluida sensibilidad del ratón) y gestor de partidas guardadas.
-Selector de idioma.
-Configuración guardada junto al ejecutable en MH3UI.graphics.
-Requisitos
-Windows 10/11 de 64 bits (build principal).
-GPU compatible con Vulkan u OpenGL ES 3.0 (vía ANGLE).
-Controladores de vídeo actualizados.
-<!-- COMPLETAR: archivos del juego necesarios y cómo obtenerlos (por ejemplo, copia propia del juego). -->
-Instalación
-Descarga el archivo de la Alpha 1.4 desde la sección Releases.
-Descomprímelo en una carpeta con permisos de escritura (evita Program Files, porque la configuración se guarda junto al .exe).
-<!-- COMPLETAR: pasos para colocar los archivos del juego. -->
-Ejecuta MH3.exe.
+Full prerequisites, disc extraction, translation, CMake configuration, DLL setup and troubleshooting are in **[BUILDINSTRUCTIONS.md](BUILDINSTRUCTIONS.md)**.
+
+## Known limitations
+
+- Only the PAL release is supported.
+- Game data is not distributed. A compatible PAL disc image is mandatory.
+- The newest upstream source is not publicly available, so this repository may lag behind.
+- Online play and some optional features may depend on the specific build and are not guaranteed to match the latest upstream release.
+
+## License
+
+The project is distributed under the GNU General Public License v3.0. See [LICENSE](LICENSE).

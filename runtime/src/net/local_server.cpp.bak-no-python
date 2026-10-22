@@ -1,0 +1,181 @@
+// Ciudad offline (local_server.h): arranca, oculto y solo cuando el juego usa la
+// red por primera vez, el MH3SP local que hay en OnlineLocal\ junto al exe, y
+// apunta el modo online del port a el.
+#include "local_server.h"
+
+#include "nas_server.h"
+#include "online.h"
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <string>
+#include <vector>
+
+namespace {
+constexpr const char* kServer = "127.0.0.1:18080"; // NAS local; el resto lo da MH3SP en 127.0.0.1
+constexpr uint16_t kNasPort = 18080, kOpnPort = 8200;
+bool configured = false, started = false;
+HANDLE job = nullptr;
+
+std::filesystem::path Root() {
+    wchar_t path[32768]{};
+    const DWORD length = GetModuleFileNameW(nullptr, path, 32768);
+    const auto exe = (length > 0 && length < 32768) ? std::filesystem::path(std::wstring(path, length)).parent_path() : std::filesystem::current_path();
+    return exe / L"OnlineLocal";
+}
+
+bool Installed() {
+    std::error_code ec;
+    return std::filesystem::exists(Root() / L"MH3SP" / L"master_server.py", ec);
+}
+
+// OnlineLocal\modo.txt con la palabra "comunidad": usar mh3sp.com en vez del servidor local.
+bool CommunityMode() {
+    std::ifstream in(Root() / L"modo.txt");
+    std::string word;
+    return (in >> word) && word == "comunidad";
+}
+
+std::wstring PythonExe() {
+    std::error_code ec;
+    const auto bundled = Root() / L"python" / L"python.exe";
+
+    if (std::filesystem::exists(bundled, ec))
+        return bundled.wstring();
+
+    wchar_t found[MAX_PATH]{};
+
+    if (SearchPathW(nullptr, L"python.exe", nullptr, MAX_PATH, found, nullptr))
+        return found;
+
+    return L"";
+}
+
+bool PortOpen(uint16_t port) {
+    const SOCKET handle = ::socket(AF_INET, SOCK_STREAM, 0);
+
+    if (handle == INVALID_SOCKET)
+        return false;
+
+    u_long nonBlocking = 1;
+    ioctlsocket(handle, FIONBIO, &nonBlocking);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+    ::connect(handle, reinterpret_cast<const sockaddr*>(&address), sizeof(address));
+    fd_set writable, failed;
+    FD_ZERO(&writable);
+    FD_ZERO(&failed);
+    FD_SET(handle, &writable);
+    FD_SET(handle, &failed);
+    timeval wait{0, 150000};
+    const int ready = ::select(0, nullptr, &writable, &failed, &wait);
+    const bool open = ready > 0 && FD_ISSET(handle, &writable) && !FD_ISSET(handle, &failed);
+    ::closesocket(handle);
+    return open;
+}
+
+bool Spawn(const std::wstring& python, const std::wstring& arguments, const std::filesystem::path& directory) {
+    const std::wstring command = L"\"" + python + L"\" -u " + arguments;
+    std::vector<wchar_t> buffer(command.begin(), command.end());
+    buffer.push_back(L'\0');
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+
+    if (!CreateProcessW(nullptr, buffer.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, directory.c_str(), &startup, &process))
+        return false;
+
+    // En el trabajo: los servidores mueren con el port.
+    if (job)
+        AssignProcessToJobObject(job, process.hProcess);
+
+    ResumeThread(process.hThread);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return true;
+}
+} // namespace
+
+namespace LocalOnlineServer {
+void Configure() {
+    // Un servidor elegido a mano (MH3_ONLINE_SERVER) manda.
+    if (std::getenv("MH3_ONLINE_SERVER") || !Installed() || CommunityMode())
+        return;
+
+    SetOnlineServerSetting(kServer);
+    SetSkipTlsSetting(true);
+    configured = true;
+    std::fprintf(stderr, "MH3 ciudad offline: servidor local en %s (OnlineLocal)\n", kServer);
+}
+
+void Ensure() {
+    if (!configured || started)
+        return;
+
+    started = true;
+    WSADATA data{};
+    WSAStartup(MAKEWORD(2, 2), &data);
+
+    // El NAS va dentro del exe (nas_server.cpp); si algo ya escucha en su puerto
+    // (una ejecucion anterior), se reutiliza.
+    if (!PortOpen(kNasPort) && !NasServer::Start(kNasPort))
+        std::fprintf(stderr, "MH3 ciudad offline: no pude abrir el NAS local en el puerto %d\n", int(kNasPort));
+
+    if (PortOpen(kOpnPort))
+        return;
+
+    const std::wstring python = PythonExe();
+
+    if (python.empty()) {
+        std::fprintf(stderr, "MH3 ciudad offline: el servidor del protocolo (OPN) aun necesita Python en OnlineLocal\\python\\python.exe\n");
+        return;
+    }
+
+    job = CreateJobObjectW(nullptr, nullptr);
+
+    if (job) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
+    }
+
+    if (!Spawn(python, L"master_server.py -s", Root() / L"MH3SP")) {
+        std::fprintf(stderr, "MH3 ciudad offline: no pude arrancar el servidor del protocolo\n");
+        return;
+    }
+
+    // Hasta ~15 s a que respondan.
+    for (int i = 0; i < 100; ++i) {
+        if (PortOpen(kNasPort) && PortOpen(kOpnPort)) {
+            std::fprintf(stderr, "MH3 ciudad offline: servidores listos tras %d ms\n", i * 150);
+            return;
+        }
+
+        Sleep(100);
+    }
+
+    std::fprintf(stderr, "MH3 ciudad offline: los servidores no respondieron a tiempo\n");
+}
+} // namespace LocalOnlineServer
+#else
+namespace LocalOnlineServer {
+void Configure() {}
+void Ensure() {}
+} // namespace LocalOnlineServer
+#endif

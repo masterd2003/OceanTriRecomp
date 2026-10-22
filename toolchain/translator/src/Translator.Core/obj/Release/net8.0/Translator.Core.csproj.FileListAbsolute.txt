@@ -1,0 +1,12 @@
+C:\Users\david\Documents\GitHub\OceanTriRecomp\toolchain\translator\src\Translator.Core\bin\Release\net8.0\Translator.Core.deps.json
+C:\Users\david\Documents\GitHub\OceanTriRecomp\toolchain\translator\src\Translator.Core\bin\Release\net8.0\Translator.Core.dll
+C:\Users\david\Documents\GitHub\OceanTriRecomp\toolchain\translator\src\Translator.Core\bin\Release\net8.0\Translator.Core.pdb
+C:\Users\david\Documents\GitHub\OceanTriRecomp\toolchain\translator\src\Translator.Core\obj\Release\net8.0\Translator.Core.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\david\Documents\GitHub\OceanTriRecomp\toolchain\translator\src\Translator.Core\obj\Release\net8.0\Translator.Core.AssemblyInfoInputs.cache
+C:\Users\david\Documents\GitHub\OceanTriRecomp\toolchain\translator\src\Translator.Core\obj\Release\net8.0\Translator.Core.AssemblyInfo.cs
+C:\Users\david\Documents\GitHub\OceanTriRecomp\toolchain\translator\src\Translator.Core\obj\Release\net8.0\Translator.Core.csproj.CoreCompileInputs.cache
+C:\Users\david\Documents\GitHub\OceanTriRecomp\toolchain\translator\src\Translator.Core\obj\Release\net8.0\Translator.Core.sourcelink.json
+C:\Users\david\Documents\GitHub\OceanTriRecomp\toolchain\translator\src\Translator.Core\obj\Release\net8.0\Translator.Core.dll
+C:\Users\david\Documents\GitHub\OceanTriRecomp\toolchain\translator\src\Translator.Core\obj\Release\net8.0\refint\Translator.Core.dll
+C:\Users\david\Documents\GitHub\OceanTriRecomp\toolchain\translator\src\Translator.Core\obj\Release\net8.0\Translator.Core.pdb
+C:\Users\david\Documents\GitHub\OceanTriRecomp\toolchain\translator\src\Translator.Core\obj\Release\net8.0\ref\Translator.Core.dll

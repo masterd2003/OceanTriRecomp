@@ -1,0 +1,24 @@
+# CMake build trees
+build/
+runtime/build/
+cmake-build-*/
+
+# Generated translation output (large and game-derived; regenerate from a PAL disc)
+generated/
+
+# Generated compilation database consumed by clangd
+compile_commands.json
+compile_commands.json.tmp
+
+# clangd index cache and local clangd config
+.cache/
+.clangd
+
+# Local editor settings (clangd arguments live in .vscode/settings.json)
+.vscode/
+.vs/
+
+# CMake caches and user presets
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json

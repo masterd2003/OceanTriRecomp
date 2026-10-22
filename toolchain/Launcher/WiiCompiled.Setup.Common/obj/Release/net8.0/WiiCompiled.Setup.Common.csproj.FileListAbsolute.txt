@@ -1,0 +1,10 @@
+C:\Users\david\Documents\GitHub\OceanTriRecomp\toolchain\Launcher\WiiCompiled.Setup.Common\bin\Release\net8.0\WiiCompiled.Setup.Common.deps.json
+C:\Users\david\Documents\GitHub\OceanTriRecomp\toolchain\Launcher\WiiCompiled.Setup.Common\bin\Release\net8.0\WiiCompiled.Setup.Common.dll
+C:\Users\david\Documents\GitHub\OceanTriRecomp\toolchain\Launcher\WiiCompiled.Setup.Common\obj\Release\net8.0\WiiCompiled.Setup.Common.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\david\Documents\GitHub\OceanTriRecomp\toolchain\Launcher\WiiCompiled.Setup.Common\obj\Release\net8.0\WiiCompiled.Setup.Common.AssemblyInfoInputs.cache
+C:\Users\david\Documents\GitHub\OceanTriRecomp\toolchain\Launcher\WiiCompiled.Setup.Common\obj\Release\net8.0\WiiCompiled.Setup.Common.AssemblyInfo.cs
+C:\Users\david\Documents\GitHub\OceanTriRecomp\toolchain\Launcher\WiiCompiled.Setup.Common\obj\Release\net8.0\WiiCompiled.Setup.Common.csproj.CoreCompileInputs.cache
+C:\Users\david\Documents\GitHub\OceanTriRecomp\toolchain\Launcher\WiiCompiled.Setup.Common\obj\Release\net8.0\WiiCompiled.Setup.Common.sourcelink.json
+C:\Users\david\Documents\GitHub\OceanTriRecomp\toolchain\Launcher\WiiCompiled.Setup.Common\obj\Release\net8.0\WiiCompiled.Setup.Common.dll
+C:\Users\david\Documents\GitHub\OceanTriRecomp\toolchain\Launcher\WiiCompiled.Setup.Common\obj\Release\net8.0\refint\WiiCompiled.Setup.Common.dll
+C:\Users\david\Documents\GitHub\OceanTriRecomp\toolchain\Launcher\WiiCompiled.Setup.Common\obj\Release\net8.0\ref\WiiCompiled.Setup.Common.dll
